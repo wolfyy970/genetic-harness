@@ -1,0 +1,27 @@
+{
+  "name": "genetic-harness",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest",
+    "run": "tsx src/orchestrator/run.ts",
+    "serve": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "isolated-vm": "^5.0.4",
+    "esbuild": "^0.25.0",
+    "seedrandom": "^3.0.5",
+    "pino": "^9.6.0",
+    "zod": "^3.24.0",
+    "glob": "^11.0.1",
+    "globrex": "^0.1.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "vitest": "^3.0.0",
+    "@types/seedrandom": "^3.0.8",
+    "@types/node": "^22.0.0"
+  }
+}

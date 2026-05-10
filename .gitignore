@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.hermes/kanban.db
+*_test.ts
+*_check.ts
+*_full_test.ts
+*_entry_test.ts
+*_quick_test.ts
+*_llm_check.ts
+*_final_test.ts
