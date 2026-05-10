@@ -3,6 +3,7 @@ dist/
 .env
 .hermes/kanban.db
 data/
+.DS_Store
 *_test.ts
 *_check.ts
 *_full_test.ts

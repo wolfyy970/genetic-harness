@@ -1,39 +1,50 @@
 /**
  * Configuration loading and merging utilities for the genetic harness.
  *
- * Provides functions to load the harness configuration from defaults
- * with optional overrides, and to shallow-merge two config objects.
- *
  * @module config
+ *
+ * Layering, lowest precedence first:
+ *   1. `DEFAULT_CONFIG` from types.ts (compiled-in)
+ *   2. Env-var overrides (read at `loadConfig` call time)
+ *   3. `overrides` argument (CLI JSON, runEvolution(...) caller, etc.)
+ *
+ * Env vars all use the `HARNESS_` prefix for consistency with the server's
+ * own bind-host / token / archive vars.
  */
 
 import { HarnessConfig, DEFAULT_CONFIG } from './types.js';
 
 /**
- * Load the harness configuration with optional overrides.
+ * Read env-var overrides for fields that have a useful default-from-env
+ * path. A value is only included when the env var is set, so callers
+ * still see hardcoded defaults when env is empty.
+ */
+function envOverrides(): Partial<HarnessConfig> {
+  const out: Partial<HarnessConfig> = {};
+  if (process.env.HARNESS_LLM_BASE_URL) out.llmBaseUrl = process.env.HARNESS_LLM_BASE_URL;
+  if (process.env.HARNESS_LLM_MODEL) out.llmModel = process.env.HARNESS_LLM_MODEL;
+  if (process.env.HARNESS_LLM_API_KEY) out.llmApiKey = process.env.HARNESS_LLM_API_KEY;
+  if (process.env.HARNESS_ARCHIVE_DIR) out.archiveDir = process.env.HARNESS_ARCHIVE_DIR;
+  return out;
+}
+
+/**
+ * Load the harness configuration with env-var defaults + caller overrides.
  *
- * Merges `overrides` on top of the built-in `DEFAULT_CONFIG`.
- * Useful for creating a config from a partial object or environment variables.
- *
- * @param overrides - Partial config to override defaults
- * @returns Full `HarnessConfig` with defaults + overrides applied
+ * @param overrides - Partial config to override env + defaults
+ * @returns Full `HarnessConfig`
  */
 export function loadConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
   return {
     ...DEFAULT_CONFIG,
+    ...envOverrides(),
     ...overrides,
   };
 }
 
 /**
- * Merge a base configuration with overrides, returning a new object.
- *
- * This is a shallow merge — nested properties are replaced entirely,
- * not merged recursively.
- *
- * @param base      - The base configuration to extend
- * @param overrides - Partial config to apply on top
- * @returns A new `HarnessConfig` with overrides applied
+ * Shallow-merge a base config with overrides. Used for partial updates
+ * outside the `loadConfig` flow.
  */
 export function mergeConfig(base: HarnessConfig, overrides: Partial<HarnessConfig>): HarnessConfig {
   return { ...base, ...overrides };

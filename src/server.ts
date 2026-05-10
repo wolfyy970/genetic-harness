@@ -24,7 +24,7 @@ import { loadLeaderboard, loadManifest, readReplay } from './replay/store.js';
 import { RunManager } from './server/run-manager.js';
 import { isAuthorized, getAuthToken, validateBindHost } from './server/auth.js';
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = parseInt(process.env.HARNESS_PORT ?? '3000', 10);
 const HOST = process.env.HARNESS_HOST ?? '127.0.0.1';
 let archiveDir = process.env.HARNESS_ARCHIVE_DIR ?? './data/archive';
 const PUBLIC_DIR = resolve(

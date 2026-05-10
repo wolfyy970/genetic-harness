@@ -2,7 +2,7 @@
 
 ## Install
 
-Requires Node ≥22 and a working C++ toolchain (for the native `isolated-vm` build).
+Requires Node ≥22.7 (for `--env-file-if-exists`) and a working C++ toolchain (for the native `isolated-vm` build).
 
 ```bash
 npm install              # ~1 min on first install
@@ -66,14 +66,19 @@ The `stages.syntax` field is currently a no-op — the compile gate is unconditi
 
 ## Environment variables
 
+`npm run serve` and `npm run run` are wrapped with `node --env-file-if-exists=.env`, so values placed in a project-root `.env` file are picked up automatically. A starter is checked in at [.env.example](.env.example) — copy to `.env` and edit. `.env` is gitignored.
+
 | Variable | Effect |
 |---|---|
 | `LLM_MOCK=1` | Force mock-LLM mode regardless of `llmBaseUrl`. |
 | `DEBUG` | Any truthy value enables `logger.debug(...)` output. |
-| `PORT` | Server listen port. Default `3000`. |
+| `HARNESS_PORT` | Server listen port. Default `3000`. |
 | `HARNESS_HOST` | Server bind host. Default `127.0.0.1`. Setting to a non-loopback host requires `HARNESS_TOKEN`. |
 | `HARNESS_TOKEN` | Bearer token gating `/api/*`. When unset, no auth (loopback only). |
-| `HARNESS_ARCHIVE_DIR` | Override the dashboard's archive root. Default `./data/archive`. |
+| `HARNESS_ARCHIVE_DIR` | Override the archive root. Default `./data/archive`. Applies to both server and orchestrator. |
+| `HARNESS_LLM_BASE_URL` | Default `llmBaseUrl` for new runs. Overridden by per-run JSON. |
+| `HARNESS_LLM_MODEL` | Default `llmModel` for new runs. |
+| `HARNESS_LLM_API_KEY` | Default `llmApiKey` for new runs. Stripped from persisted manifests. |
 
 ## LLM modes
 
