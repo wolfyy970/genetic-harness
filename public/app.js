@@ -278,15 +278,6 @@ function togglePlay() {
 
 // ---- selection -----------------------------------------------------------
 
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
 function renderBotSource(shipId) {
   if (!els.botSourcePanel || !els.botSourceName || !els.botSourceCode) return;
 
@@ -304,7 +295,8 @@ function renderBotSource(shipId) {
   }
 
   els.botSourceName.textContent = `${bot.shipId ?? bot.id} · gen ${bot.metadata?.generation ?? 0} · fitness ${fmt(bot.fitness?.fitnessScore, 3)}`;
-  els.botSourceCode.innerHTML = escapeHtml(bot.source);
+  // textContent is safe by default; no manual HTML-escaping needed.
+  els.botSourceCode.textContent = bot.source;
   els.botSourcePanel.classList.add('active');
 }
 
@@ -431,73 +423,61 @@ async function pollRuns() {
   }
 }
 
-let modelFetchStatus = '';
-
+/**
+ * Update the model `<select>`'s first option to surface fetch status.
+ * The first option is the placeholder/status row — its text is what the
+ * user sees when no model is picked yet.
+ */
 function setModelStatus(msg) {
-  modelFetchStatus = msg;
-  const modelInput = els.runForm?.elements?.namedItem('llmModel');
-  if (modelInput) modelInput.placeholder = msg || 'loading…';
+  const select = document.getElementById('model-select');
+  if (!select?.options?.length) return;
+  select.options[0].textContent = msg || 'Select a model…';
 }
 
 async function fetchModels(baseUrl) {
-  console.log('fetchModels called with baseUrl:', baseUrl);
-  if (!baseUrl || baseUrl === 'mock') {
-    console.log('Early return - baseUrl is empty or mock');
-    return { models: [], error: null };
-  }
+  if (!baseUrl || baseUrl === 'mock') return { models: [], error: null };
   try {
     setModelStatus('fetching models…');
     // Ask our own server to proxy the request; avoids CORS when the LLM
     // server doesn't send Access-Control-Allow-Origin headers.
-    console.log('Fetching from /api/models');
     const res = await authedFetch('/api/models');
-    console.log('Response status:', res.status);
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      const err = body.error?.message || `HTTP ${res.status}`;
+      const err = body.error?.message || body.error || `HTTP ${res.status}`;
       setModelStatus(`models: ${err}`);
-      return { models: [], error: err };
+      return { models: [], error: String(err) };
     }
     const body = await res.json();
-    console.log('Response body:', body);
     const models = (body.data ?? [])
       .filter((m) => m.object === 'model' || m.id)
       .map((m) => m.id)
       .filter(Boolean);
-    console.log('Parsed models:', models.length, models);
-    setModelStatus(`${models.length} models found`);
+    setModelStatus(
+      models.length === 0 ? 'no models found' : `${models.length} models — pick one`,
+    );
     return { models, error: null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error('fetchModels error:', msg);
     setModelStatus(`models: ${msg}`);
     return { models: [], error: msg };
   }
 }
 
 function populateModelSelect(models) {
-  console.log('populateModelSelect called with', models?.length, 'models');
   const select = document.getElementById('model-select');
-  if (!select) {
-    console.error('Select element not found!');
-    return;
-  }
-  // Keep the first "Select a model..." option
-  const placeholder = select.options[0];
+  if (!select) return;
+  // Preserve the first option (the status/placeholder row) and replace
+  // everything after it with the new model list.
+  const placeholder = select.options[0]?.cloneNode(true);
   select.innerHTML = '';
-  select.appendChild(placeholder);
-  
-  if (!models || models.length === 0) {
-    console.log('No models to populate');
-    return;
-  }
+  if (placeholder) select.appendChild(placeholder);
+  if (!models || models.length === 0) return;
   for (const id of models) {
     const opt = document.createElement('option');
     opt.value = id;
     opt.textContent = id;
     select.appendChild(opt);
   }
-  console.log('Populated select with', select.options.length - 1, 'options');
 }
 
 async function refreshModelList() {
@@ -511,34 +491,24 @@ async function refreshModelList() {
 async function loadDefaults() {
   try {
     const res = await authedFetch('/api/defaults');
-    if (!res.ok) {
-      console.error('Failed to load defaults:', res.status);
-      return;
-    }
+    if (!res.ok) return;
     const body = await res.json();
-    console.log('Loaded defaults:', body);
     const modelSelect = document.getElementById('model-select');
     const baseInput = els.runForm.elements.namedItem('llmBaseUrl');
-    
+
     if (baseInput && !baseInput.value) baseInput.value = body.llmBaseUrl ?? '';
     if (baseInput) baseInput.placeholder = body.llmBaseUrl ?? '';
-    
-    // Store the default model to select after population
+
     const defaultModel = body.llmModel ?? '';
-    
-    console.log('About to refresh models with baseUrl:', baseInput?.value);
     await refreshModelList();
-    
-    // Select the default model if it exists in the list
     if (modelSelect && defaultModel) {
-      const options = Array.from(modelSelect.options);
-      const match = options.find(opt => opt.value === defaultModel);
-      if (match) {
-        modelSelect.value = defaultModel;
-      }
+      const match = Array.from(modelSelect.options).find(
+        (opt) => opt.value === defaultModel,
+      );
+      if (match) modelSelect.value = defaultModel;
     }
-  } catch (err) {
-    console.error('Error in loadDefaults:', err);
+  } catch {
+    /* swallow — placeholder text remains visible */
   }
 }
 
@@ -641,19 +611,19 @@ let lastServerStartTime = null;
 
 async function checkLiveReload() {
   try {
-    const res = await fetch('/api/state');
+    // Use authedFetch so live-reload still works when HARNESS_TOKEN is set.
+    const res = await authedFetch('/api/state');
     if (!res.ok) return;
     const body = await res.json();
     const startTime = body?.serverStartTime;
     if (!startTime) return;
     if (lastServerStartTime && lastServerStartTime !== startTime) {
-      console.log('[livereload] Server restarted — reloading page');
       window.location.reload();
       return;
     }
     lastServerStartTime = startTime;
   } catch {
-    // Server might be restarting; check again next interval
+    // Server might be restarting; check again next interval.
   }
 }
 

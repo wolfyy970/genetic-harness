@@ -357,15 +357,64 @@ describe('GET /api/models', () => {
   });
 
   it('proxies models from the configured LLM server', async () => {
-    // This test runs against the real LLM server on localhost:8000
-    // which is expected to be running in the dev environment.
-    const res = await fetch(`${baseUrl}/api/models`);
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(Array.isArray(body.data)).toBe(true);
-    expect(body.data.length).toBeGreaterThan(0);
-    expect(body.data[0]).toHaveProperty('id');
-    expect(body.data[0]).toHaveProperty('object', 'model');
+    // Stand up a stub upstream so this test isn't dependent on a live
+    // oMLX / OpenAI-compatible server being reachable at localhost:8000.
+    // The proxy reads `llmBaseUrl` via loadConfig() at request time, so
+    // overriding HARNESS_LLM_BASE_URL is sufficient.
+    const { createServer } = await import('node:http');
+    const upstream = createServer((req, res) => {
+      const auth = req.headers['authorization'] ?? '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          object: 'list',
+          data: [
+            { id: 'StubModel-1', object: 'model', authSeen: auth },
+            { id: 'StubModel-2', object: 'model' },
+          ],
+        }),
+      );
+    });
+    await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+
+    const savedBase = process.env.HARNESS_LLM_BASE_URL;
+    const savedKey = process.env.HARNESS_LLM_API_KEY;
+    process.env.HARNESS_LLM_BASE_URL = `http://127.0.0.1:${upstreamPort}/v1`;
+    process.env.HARNESS_LLM_API_KEY = 'stub-key';
+
+    try {
+      const res = await fetch(`${baseUrl}/api/models`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body.data.length).toBe(2);
+      expect(body.data[0]).toHaveProperty('id', 'StubModel-1');
+      expect(body.data[0]).toHaveProperty('object', 'model');
+      // Verifies the proxy forwarded the API key to the upstream.
+      expect(body.data[0].authSeen).toBe('Bearer stub-key');
+    } finally {
+      await new Promise<void>((r) => upstream.close(() => r()));
+      if (savedBase !== undefined) process.env.HARNESS_LLM_BASE_URL = savedBase;
+      else delete process.env.HARNESS_LLM_BASE_URL;
+      if (savedKey !== undefined) process.env.HARNESS_LLM_API_KEY = savedKey;
+      else delete process.env.HARNESS_LLM_API_KEY;
+    }
+  });
+
+  it('returns 502 when the upstream LLM server is unreachable', async () => {
+    const savedBase = process.env.HARNESS_LLM_BASE_URL;
+    // Port 1 is privileged + nothing listens there — guaranteed connection refused.
+    process.env.HARNESS_LLM_BASE_URL = 'http://127.0.0.1:1/v1';
+    try {
+      const res = await fetch(`${baseUrl}/api/models`);
+      expect(res.status).toBe(502);
+      const body = await res.json();
+      expect(typeof body.error).toBe('string');
+    } finally {
+      if (savedBase !== undefined) process.env.HARNESS_LLM_BASE_URL = savedBase;
+      else delete process.env.HARNESS_LLM_BASE_URL;
+    }
   });
 });
 
