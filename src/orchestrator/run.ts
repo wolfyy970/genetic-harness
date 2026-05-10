@@ -303,10 +303,16 @@ export async function runEvolution(
     const newBots = (await Promise.all(mutationPromises)).filter(Boolean) as ArchivedBot[];
 
     // Evaluate mutations
+    // Snapshot the population's current top-K once per generation so all
+    // mutations evaluated this generation share the same self-play pool.
+    const selfPlayPool = config.stages.selfPlay?.enabled
+      ? population.getTopK(config.stages.selfPlay.topK)
+      : [];
+    const evalOptsForGen = { ...evalOpts, selfPlayPool };
     const evalPromises = newBots.map(async (bot) => {
       monitor.tick(bot.id, 'evaluating');
       try {
-        const result = await evaluate(bot, config.arena, config, evalOpts);
+        const result = await evaluate(bot, config.arena, config, evalOptsForGen);
         monitor.tick(bot.id, `evaluated stage ${result.stage}`);
 
         // Add to population with updated fitness

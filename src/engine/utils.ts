@@ -165,3 +165,30 @@ export class SeededRNG {
     return arr;
   }
 }
+
+/**
+ * Generate a jagged-polygon vertex set for an asteroid.
+ *
+ * Walks `vertexCount` evenly-spaced angles around a circle of `radius`,
+ * jittering each vertex's distance by ±25% of `radius` via the supplied
+ * RNG. Result is deterministic from the RNG state and visually irregular
+ * enough to read as "asteroid-like" rather than a circle.
+ *
+ * @param radius     Mean radius (used by collision math).
+ * @param rng        Seeded RNG; `radius` jitter draws here.
+ * @param vertexCount Defaults to 8.
+ */
+export function generateAsteroidVertices(
+  radius: number,
+  rng: SeededRNG,
+  vertexCount = 8,
+): Vector2D[] {
+  const verts: Vector2D[] = [];
+  for (let i = 0; i < vertexCount; i++) {
+    const angle = (i / vertexCount) * Math.PI * 2;
+    const jitter = rng.nextRange(0.75, 1.25);
+    const r = radius * jitter;
+    verts.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+  }
+  return verts;
+}

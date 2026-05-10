@@ -14,8 +14,14 @@ import type {
 import type { GridCellSnapshot } from '../orchestrator/population.js';
 import type { ShipReport } from '../orchestrator/match.js';
 
-/** Schema version for individual replay files. Bump when shape changes. */
-export const REPLAY_SCHEMA = 1;
+/**
+ * Schema version for individual replay files. Bump when shape changes.
+ *
+ * History:
+ *   1 — initial circular asteroids; ship/bullet/asteroid entities
+ *   2 — asteroids gain `vertices` + `rotation` for jagged polygonal rendering
+ */
+export const REPLAY_SCHEMA = 2;
 
 /** Schema version for `manifest.json`. */
 export const MANIFEST_SCHEMA = 1;

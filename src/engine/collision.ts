@@ -15,11 +15,38 @@ import type {
   GameState,
   ShipState,
 } from '../shared/types.js';
-import { dist } from './utils.js';
+import { dist, generateAsteroidVertices, SeededRNG } from './utils.js';
 
 // Collision radii offsets (hitboxes)
 const BULLET_RADIUS = 3;
 const SHIP_RADIUS = 10;
+
+// Ship-asteroid collision damage. Real Asteroids gives one mistake — we
+// give two at rest, one at full speed. Ship has 100 health.
+const COLLISION_DAMAGE_BASE = 50;
+const COLLISION_DAMAGE_VEL_FACTOR = 1.0;
+
+// Score table — Asteroids-arcade convention. Smaller targets are worth more.
+const SCORE_BULLET_HIT_ASTEROID = 1;
+const SCORE_ASTEROID_LARGE = 20;   // radius ≥ 40
+const SCORE_ASTEROID_MEDIUM = 50;  // 20 ≤ radius < 40
+const SCORE_ASTEROID_SMALL = 100;  // radius < 20
+const SCORE_BULLET_HIT_SHIP = 5;
+const SCORE_SHIP_KILL = 200;
+
+/** Credit a ship's score by id. No-op if the ship is missing or already destroyed. */
+function creditScore(state: GameState, shipId: string, points: number): void {
+  const ship = state.ships.find((s) => s.id === shipId);
+  if (!ship) return;
+  ship.score += points;
+}
+
+/** Score for destroying an asteroid of the given radius. */
+function asteroidKillScore(radius: number): number {
+  if (radius >= 40) return SCORE_ASTEROID_LARGE;
+  if (radius >= 20) return SCORE_ASTEROID_MEDIUM;
+  return SCORE_ASTEROID_SMALL;
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -68,6 +95,9 @@ export function detectCollisions(state: GameState): CollisionEvent[] {
         // Apply damage
         asteroid.health -= bullet.damage;
 
+        // Credit the shooting ship for landing the hit.
+        creditScore(state, bullet.owner, SCORE_BULLET_HIT_ASTEROID);
+
         events.push({
           type: 'bullet_asteroid',
           bullet,
@@ -77,6 +107,8 @@ export function detectCollisions(state: GameState): CollisionEvent[] {
         // If asteroid health is 0 or below, remove it
         if (asteroid.health <= 0) {
           asteroidsToRemove.add(ai);
+          // Kill credit, scaled by parent radius.
+          creditScore(state, bullet.owner, asteroidKillScore(asteroid.radius));
           events.push({
             type: 'asteroid_destroyed',
             asteroid,
@@ -118,6 +150,12 @@ export function detectCollisions(state: GameState): CollisionEvent[] {
           ship.health -= Math.ceil(bullet.damage * 0.5);
         }
 
+        // Don't credit friendly fire (bullet hitting your own ship is its
+        // own punishment via lost health).
+        if (bullet.owner !== ship.id) {
+          creditScore(state, bullet.owner, SCORE_BULLET_HIT_SHIP);
+        }
+
         events.push({
           type: 'bullet_ship',
           bullet,
@@ -126,6 +164,9 @@ export function detectCollisions(state: GameState): CollisionEvent[] {
 
         if (ship.health <= 0) {
           ship.health = 0;
+          if (bullet.owner !== ship.id) {
+            creditScore(state, bullet.owner, SCORE_SHIP_KILL);
+          }
           events.push({
             type: 'ship_destroyed',
             ship,
@@ -153,10 +194,11 @@ export function detectCollisions(state: GameState): CollisionEvent[] {
             Math.pow(asteroid.vel.y - ship.vel.y, 2),
         );
 
-        // Damage scales with asteroid radius and relative velocity
-        const baseDamage = asteroid.radius * 0.8;
-        const velocityFactor = 1 + relVel * 0.3;
-        const totalDamage = baseDamage * velocityFactor;
+        // Damage scales with relative velocity. Base damage is intentionally
+        // high so collisions are real evolutionary pressure — bots that
+        // ignore asteroids die in 1-2 hits.
+        const velocityFactor = 1 + relVel * COLLISION_DAMAGE_VEL_FACTOR;
+        const totalDamage = COLLISION_DAMAGE_BASE * velocityFactor;
 
         // Shields absorb most damage first
         ship.shields = Math.max(0, ship.shields - totalDamage * 0.7);
@@ -250,18 +292,25 @@ export function detectCollisions(state: GameState): CollisionEvent[] {
  */
 function spawnAsteroidFragments(parent: Asteroid, count: number): Asteroid[] {
   const fragments: Asteroid[] = [];
-  const childRadius = parent.radius * (0.45 + Math.random() * 0.1); // 45-55%
+  // Derive a fragment-local RNG from the parent id so vertex jitter is
+  // reproducible without coupling to the global tick RNG.
+  const seed =
+    Array.from(parent.id).reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 17) ^
+    Math.floor(parent.pos.x);
+  const rng = new SeededRNG(seed);
+  const childRadius = parent.radius * rng.nextRange(0.45, 0.55);
   const speed = Math.sqrt(parent.vel.x * parent.vel.x + parent.vel.y * parent.vel.y);
 
   for (let i = 0; i < count; i++) {
-    // Perturb the velocity direction so fragments spread apart
-    const angleSpread = ((Math.PI * 2) / count) * i + (Math.random() - 0.5) * 0.5;
-    const fragmentSpeed = speed * (0.8 + Math.random() * 0.4);
+    const angleSpread =
+      ((Math.PI * 2) / count) * i + rng.nextRange(-0.25, 0.25);
+    const fragmentSpeed = speed * rng.nextRange(0.8, 1.2);
 
     const vel = {
       x: Math.cos(angleSpread) * fragmentSpeed,
       y: Math.sin(angleSpread) * fragmentSpeed,
     };
+    const r = Math.max(10, childRadius);
 
     const fragment: Asteroid = {
       id: `${parent.id}-split-${i}`,
@@ -271,9 +320,12 @@ function spawnAsteroidFragments(parent: Asteroid, count: number): Asteroid[] {
         y: parent.pos.y + Math.sin(angleSpread) * parent.radius * 0.5,
       },
       vel,
-      radius: Math.max(10, childRadius),
-      health: Math.max(1, Math.ceil(childRadius / 15)),
-      mass: Math.PI * childRadius * childRadius * 0.01,
+      radius: r,
+      health: Math.max(1, Math.ceil(r / 15)),
+      mass: Math.PI * r * r * 0.01,
+      vertices: generateAsteroidVertices(r, rng),
+      rotation: rng.nextRange(0, Math.PI * 2),
+      angularVel: rng.nextRange(-0.08, 0.08),
     };
 
     fragments.push(fragment);

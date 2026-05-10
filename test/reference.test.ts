@@ -37,6 +37,9 @@ const SAMPLE_STATE: BotState = {
       radius: 25,
       health: 2,
       mass: 1,
+      vertices: [],
+      rotation: 0,
+      angularVel: 0,
     },
   ],
   opponents: [
@@ -72,12 +75,16 @@ describe('Reference roster', () => {
     }
   });
 
-  it('contains the four expected scripted bots in stable order', () => {
+  it('contains the eight expected scripted bots in stable order', () => {
     expect(REFERENCE_ROSTER.map((b) => b.id)).toEqual([
       'ref-null',
       'ref-random',
       'ref-aggressive',
       'ref-evasive',
+      'ref-sniper',
+      'ref-hunter',
+      'ref-drifter',
+      'ref-berserker',
     ]);
   });
 

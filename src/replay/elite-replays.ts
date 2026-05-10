@@ -54,7 +54,7 @@ function makeReplayConfig(overrides: Partial<GameConfig> = {}): GameConfig {
     worldWidth: 800,
     worldHeight: 600,
     seed: REPLAY_SEED,
-    asteroidCount: 4,
+    asteroidCount: 8,
     tickMs: 50,
     maxBulletsPerShip: 3,
     bulletSpeed: 8,
@@ -62,7 +62,7 @@ function makeReplayConfig(overrides: Partial<GameConfig> = {}): GameConfig {
     shipRotationSpeed: 0.08,
     shipMaxFuel: 10000,
     asteroidBaseRadius: 25,
-    asteroidSpeed: 1.0,
+    asteroidSpeed: 2.5,
     shipCount: 2,
     ...overrides,
   };

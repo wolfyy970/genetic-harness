@@ -24,6 +24,7 @@ import {
   angleBetween,
   SeededRNG,
   clamp,
+  generateAsteroidVertices,
 } from './utils.js';
 import { applyActionToShip } from './actions.js';
 import { logger } from '../shared/logger.js';
@@ -88,6 +89,9 @@ function createAsteroid(
     radius,
     health,
     mass,
+    vertices: generateAsteroidVertices(radius, rng),
+    rotation: rng.nextRange(0, Math.PI * 2),
+    angularVel: rng.nextRange(-0.05, 0.05),
   };
 }
 
@@ -262,6 +266,7 @@ export function worldTick(
     asteroid.pos.x += asteroid.vel.x;
     asteroid.pos.y += asteroid.vel.y;
     wrapPosition(asteroid.pos, state.worldWidth, state.worldHeight);
+    asteroid.rotation += asteroid.angularVel;
   }
 
   // Bullet aging handled above; remove dead bullets

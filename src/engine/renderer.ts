@@ -47,6 +47,8 @@ export function toReplayFrame(state: GameState): ReplayFrame {
       pos: { x: asteroid.pos.x, y: asteroid.pos.y },
       radius: asteroid.radius,
       health: asteroid.health,
+      vertices: asteroid.vertices.map((v) => ({ x: v.x, y: v.y })),
+      rotation: asteroid.rotation,
     });
   }
 

@@ -143,6 +143,9 @@ export function playMatch(
       if (ship.health <= 0) continue;
       const report = reports.get(ship.id);
       if (report) report.ticksAlive += 1;
+      // Per-tick survival bonus. Tiebreaker for matches where neither
+      // bot scores from combat. Capped implicitly by maxTicks.
+      ship.score += 1;
 
       const bot = shipBots.get(ship.id);
       const botState = bot ? buildBotState(state, ship.id) : null;

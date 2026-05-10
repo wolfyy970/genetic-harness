@@ -41,7 +41,11 @@ export interface ShipState {
 /**
  * An asteroid entity in the arena.
  *
- * Has mass-based physics, health, and splits into fragments when destroyed.
+ * Has mass-based physics, health, splits into fragments when destroyed,
+ * and a deterministic jagged polygon shape that drifts with rotation.
+ * `vertices` are stored as offsets from `pos` at zero rotation; the
+ * renderer applies `rotation` at draw time. Hit-detection still uses
+ * the bounding `radius` for performance + replay determinism.
  */
 export interface Asteroid {
   id: string;
@@ -51,6 +55,12 @@ export interface Asteroid {
   radius: number;
   health: number;
   mass: number;
+  /** 6–10 vertex offsets from `pos`, ordered counter-clockwise. */
+  vertices: Vector2D[];
+  /** Current rotation in radians. */
+  rotation: number;
+  /** Angular velocity per tick (radians). */
+  angularVel: number;
 }
 
 /**
@@ -259,6 +269,10 @@ export interface ReplayFrame {
     radius?: number;
     health?: number;
     shield?: number;
+    /** Asteroids only: polygon vertex offsets (schema 2+). Older replays omit. */
+    vertices?: Vector2D[];
+    /** Asteroids only: current rotation in radians (schema 2+). */
+    rotation?: number;
   }>;
   tick: number;
 }
@@ -455,6 +469,19 @@ export interface EvaluationCascade {
     enabled: boolean;
     games: number;
   };
+  /**
+   * Self-play stage: candidate fights the top-K elites currently in the
+   * population. Off until the population has at least one evaluated bot.
+   * Breaks the fixed-roster ceiling; this is the AlphaStar-PFSP-lite move.
+   *
+   * Optional so legacy partial-cascade configs in tests still typecheck.
+   * `DEFAULT_CONFIG.stages.selfPlay` provides the runtime default.
+   */
+  selfPlay?: {
+    enabled: boolean;
+    /** Number of top elites to play against. */
+    topK: number;
+  };
 }
 
 // =============================================================================
@@ -478,6 +505,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     quickRollout: { enabled: true, steps: 50 },
     quickGames: { enabled: true, games: 10 },
     fullTournament: { enabled: true, games: 50 },
+    selfPlay: { enabled: true, topK: 3 },
   },
   llmBaseUrl: 'http://localhost:8000/v1',
   llmModel: 'Qwen3.6-35B-A3B-8bit',

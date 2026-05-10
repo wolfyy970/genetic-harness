@@ -131,7 +131,7 @@ describe('Evolution loop (mock LLM)', () => {
     expect(existsSync(replayPath)).toBe(true);
 
     const replay = JSON.parse(readFileSync(replayPath, 'utf8'));
-    expect(replay.schema).toBe(1);
+    expect(replay.schema).toBe(2);
     expect(replay.arena).toBe('asteroids');
     expect(Array.isArray(replay.frames)).toBe(true);
     expect(replay.frames.length).toBeGreaterThan(0);

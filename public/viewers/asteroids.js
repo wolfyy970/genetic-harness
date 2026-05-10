@@ -55,6 +55,24 @@ function paintShip(ctx, e, isHero) {
 function paintAsteroid(ctx, e) {
   ctx.strokeStyle = PALETTE.asteroid;
   ctx.lineWidth = 1.5;
+
+  // Schema 2+: jagged polygon with rotation. Fall back to a circle for
+  // older replays that only carry `radius`.
+  if (Array.isArray(e.vertices) && e.vertices.length > 0) {
+    ctx.save();
+    ctx.translate(e.pos.x, e.pos.y);
+    ctx.rotate(e.rotation ?? 0);
+    ctx.beginPath();
+    ctx.moveTo(e.vertices[0].x, e.vertices[0].y);
+    for (let i = 1; i < e.vertices.length; i++) {
+      ctx.lineTo(e.vertices[i].x, e.vertices[i].y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
   ctx.beginPath();
   ctx.arc(e.pos.x, e.pos.y, e.radius ?? 20, 0, Math.PI * 2);
   ctx.stroke();

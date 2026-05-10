@@ -40,8 +40,8 @@ import {
 } from './match.js';
 import { REFERENCE_ROSTER, type ScriptedBot } from './reference.js';
 
-const DEFAULT_MATCH_TICKS = 400;
-const SMOKE_MATCH_TICKS = 80;
+const DEFAULT_MATCH_TICKS = 600;
+const SMOKE_MATCH_TICKS = 100;
 const TICK_CPU_BUDGET_MS = 50;
 const SEEDS_PER_OPPONENT = 3;
 
@@ -57,7 +57,7 @@ function makeMatchConfig(seed: number, overrides: Partial<GameConfig> = {}): Gam
     worldWidth: 800,
     worldHeight: 600,
     seed,
-    asteroidCount: 4,
+    asteroidCount: 8,
     tickMs: 50,
     maxBulletsPerShip: 3,
     bulletSpeed: 8,
@@ -65,7 +65,7 @@ function makeMatchConfig(seed: number, overrides: Partial<GameConfig> = {}): Gam
     shipRotationSpeed: 0.08,
     shipMaxFuel: 10000,
     asteroidBaseRadius: 25,
-    asteroidSpeed: 1.0,
+    asteroidSpeed: 2.5,
     shipCount: 2,
     ...overrides,
   };
@@ -319,6 +319,12 @@ export async function evaluate(
     ownPool?: boolean;
     /** Pre-compiled reference roster, keyed by reference-bot id. */
     referenceRoster?: Map<string, CompiledBot>;
+    /**
+     * Top-K elites from the current population for self-play matches.
+     * Empty (or absent) means "no self-play this evaluation". Each entry
+     * gets compiled into the pool and disposed after the cascade.
+     */
+    selfPlayPool?: ArchivedBot[];
   } = {},
 ): Promise<EvaluationResult> {
   const arena = getArena(arenaName);
@@ -407,6 +413,39 @@ export async function evaluate(
           stats.signature.push(`${opp.id}:${outcomes.join('')}`);
         }
       }
+    }
+
+    // ---- Stage 3: self-play vs top-K population elites -------------------
+    // Breaks the fixed-roster ceiling. Generation 0 falls through (empty pool).
+    const selfPlayCompiled: CompiledBot[] = [];
+    try {
+      if (
+        config.stages.selfPlay?.enabled &&
+        opts.selfPlayPool &&
+        opts.selfPlayPool.length > 0
+      ) {
+        const topK = opts.selfPlayPool.slice(0, config.stages.selfPlay.topK);
+        for (const elite of topK) {
+          // Skip the candidate playing itself (same source).
+          if (elite.shipId === bot.shipId) continue;
+          const tc = tryCompile(pool, elite.source);
+          if (!tc.bot) continue;
+          selfPlayCompiled.push(tc.bot);
+          const m = runOneMatch({
+            arena,
+            pool,
+            candidate,
+            opponent: tc.bot,
+            config: makeMatchConfig(901 + selfPlayCompiled.length, config.arenaConfig),
+            maxTicks: DEFAULT_MATCH_TICKS,
+          });
+          if (mergeMatchIntoStats(stats, m.candidate, m.outcome)) {
+            stats.signature.push(`selfplay:${elite.shipId}:${m.outcome}`);
+          }
+        }
+      }
+    } finally {
+      for (const c of selfPlayCompiled) pool.destroy(c);
     }
 
     const fitness = buildFitnessFromStats(stats, config.mode, config);

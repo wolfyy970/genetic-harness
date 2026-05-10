@@ -137,7 +137,7 @@ describe('JsonReplayRecorder', () => {
     for (let t = 0; t < 3; t++) r.onTick(makeState(t));
     const file = r.finalize(stubReport(3));
 
-    expect(file.schema).toBe(1);
+    expect(file.schema).toBe(2);
     expect(file.arena).toBe('asteroids');
     expect(file.generation).toBe(12);
     expect(file.matchId).toBe('gen0012-elite-vs-ref');
