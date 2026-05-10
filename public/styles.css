@@ -156,12 +156,15 @@ tbody tr.selected {
   border-radius: 4px;
   display: flex;
   justify-content: center;
+  width: 100%;
+  overflow: hidden;
 }
 
 #canvas {
   display: block;
-  max-width: 100%;
+  width: 100%;
   height: auto;
+  max-height: 60vh;
 }
 
 .legend {
@@ -189,8 +192,67 @@ tbody tr.selected {
 /* Grid + charts */
 
 #grid-panel,
-#charts-panel {
+#charts-panel,
+#player-panel {
   grid-column: 1 / -1;
+}
+
+#bot-source-panel {
+  grid-column: 1 / -1;
+  display: none;
+}
+
+#bot-source-panel.active {
+  display: block;
+}
+
+.bot-source-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+#bot-source-name {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+
+#copy-source {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+#copy-source:hover {
+  background: var(--hover);
+}
+
+pre.bot-source {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px;
+  margin: 0;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+pre.bot-source code {
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre;
 }
 
 .grid-heatmap {
@@ -287,8 +349,36 @@ tbody tr.selected {
   width: 100px;
 }
 
-#run-form label.wide input {
-  width: 240px;
+#run-form label.wide input,
+#run-form label.wide select {
+  width: 280px;
+}
+
+.input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.input-row input,
+.input-row select {
+  flex: 1;
+  min-width: 200px;
+}
+
+.input-row button {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  cursor: pointer;
+  min-width: 32px;
+}
+
+.input-row button:hover {
+  background: var(--hover);
 }
 
 #run-form button {

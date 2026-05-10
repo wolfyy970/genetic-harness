@@ -340,3 +340,44 @@ describe('Bearer-token auth', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('GET /api/models', () => {
+  it('returns empty data when llmBaseUrl is mock', async () => {
+    const saved = process.env.HARNESS_LLM_BASE_URL;
+    process.env.HARNESS_LLM_BASE_URL = 'mock';
+    try {
+      const res = await fetch(`${baseUrl}/api/models`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data).toEqual([]);
+    } finally {
+      if (saved !== undefined) process.env.HARNESS_LLM_BASE_URL = saved;
+      else delete process.env.HARNESS_LLM_BASE_URL;
+    }
+  });
+
+  it('proxies models from the configured LLM server', async () => {
+    // This test runs against the real LLM server on localhost:8000
+    // which is expected to be running in the dev environment.
+    const res = await fetch(`${baseUrl}/api/models`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(body.data.length).toBeGreaterThan(0);
+    expect(body.data[0]).toHaveProperty('id');
+    expect(body.data[0]).toHaveProperty('object', 'model');
+  });
+});
+
+describe('GET /api/state', () => {
+  it('returns running status and serverStartTime', async () => {
+    const res = await fetch(`${baseUrl}/api/state`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('running');
+    expect(typeof body.leaderboardSize).toBe('number');
+    expect(typeof body.archiveDir).toBe('string');
+    expect(typeof body.serverStartTime).toBe('number');
+    expect(body.serverStartTime).toBeGreaterThan(0);
+  });
+});

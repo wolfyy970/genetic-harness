@@ -28,6 +28,7 @@ import { isAuthorized, getAuthToken, validateBindHost } from './server/auth.js';
 const PORT = parseInt(process.env.HARNESS_PORT ?? '3000', 10);
 const HOST = process.env.HARNESS_HOST ?? '127.0.0.1';
 let archiveDir = process.env.HARNESS_ARCHIVE_DIR ?? './data/archive';
+const SERVER_START_TIME = Date.now();
 const PUBLIC_DIR = resolve(
   fileURLToPath(new URL('../public', import.meta.url)),
 );
@@ -158,7 +159,7 @@ function readJsonBody(req: IncomingMessage, max = 64 * 1024): Promise<unknown> {
   });
 }
 
-function handleRequest(req: IncomingMessage, res: ServerResponse): void {
+async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
@@ -215,6 +216,19 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
   }
 
   if (url.pathname === '/api/leaderboard') {
+    // Always read leaderboard.json from disk: the orchestrator writes it
+    // after every generation, so this is always current regardless of
+    // whether the run was in-process or a child process. The in-memory
+    // ref is only a cache for same-process consumers.
+    try {
+      const disk = loadLeaderboard(archiveDir);
+      if (disk && disk.length > 0) {
+        sendJson(res, 200, { count: disk.length, results: disk });
+        return;
+      }
+    } catch {
+      /* fall through to snapshot */
+    }
     const data = leaderboardSnapshot();
     sendJson(res, 200, { count: data.length, results: data });
     return;
@@ -291,7 +305,34 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
       status: 'running',
       leaderboardSize: leaderboardRef.length,
       archiveDir,
+      serverStartTime: SERVER_START_TIME,
     });
+    return;
+  }
+
+  // Proxy models list from the configured LLM base URL so the dashboard
+  // doesn't hit CORS when the LLM server omits Access-Control headers.
+  if (url.pathname === '/api/models') {
+    const config = loadConfig();
+    const base = config.llmBaseUrl;
+    if (!base || base === 'mock') {
+      sendJson(res, 200, { data: [] });
+      return;
+    }
+    try {
+      const target = base.replace(/\/$/, '') + '/models';
+      const upstream = await fetch(target, {
+        headers: config.llmApiKey ? { Authorization: `Bearer ${config.llmApiKey}` } : {},
+      });
+      if (!upstream.ok) {
+        sendJson(res, upstream.status, { error: `Upstream ${upstream.status}` });
+        return;
+      }
+      const body = await upstream.json();
+      sendJson(res, 200, body);
+    } catch (err) {
+      sendJson(res, 502, { error: (err as Error).message });
+    }
     return;
   }
 

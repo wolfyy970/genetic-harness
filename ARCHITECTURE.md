@@ -54,8 +54,9 @@ src/
 │                        path-traversal guard; pruneOldGenerations rolling window.
 ├── server.ts            HTTP server. Static (/), /static/*, JSON API
 │                        (/api/leaderboard, /api/manifest, /api/replays/:gen/:id,
-│                        /api/runs CRUD, /api/state). Optional bearer-token auth.
-│                        Only listens when invoked as the main module.
+│                        /api/runs CRUD, /api/state, /api/models, /api/defaults).
+│                        Optional bearer-token auth. Only listens when invoked as
+│                        the main module.
 └── server/
     ├── auth.ts          isAuthorized middleware + validateBindHost. Reads
     │                    HARNESS_TOKEN; constant-time compare.
@@ -68,11 +69,13 @@ Client side (vanilla JS, no bundler):
 ```
 public/
 ├── index.html        Dashboard layout: run-control header, leaderboard,
-│                     replay player, MAP-Elites grid, generation charts.
+│                     bot source inspector, replay player, MAP-Elites grid,
+│                     generation charts.
 ├── styles.css        Minimal palette; CSS-grid layout.
 ├── app.js            Manifest fetcher, leaderboard table, replay player
 │                     state machine (RAF loop, scrubber), grid+chart renderers,
-│                     run-control form, bearer-token storage.
+│                     run-control form, bearer-token storage, model dropdown
+│                     with LLM proxy, bot source panel, live-reload script.
 ├── charts.js         Tiny SVG primitives: lineChart, scatter, gridHeatmap.
 └── viewers/
     ├── asteroids.js  paint(ctx, frame, meta) + dimensions + legend.

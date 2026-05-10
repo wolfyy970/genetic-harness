@@ -9,7 +9,8 @@
     "test:watch": "vitest",
     "run": "node --env-file-if-exists=.env --import tsx src/orchestrator/run.ts",
     "smoke": "tsx src/orchestrator/run.ts '{\"llmBaseUrl\":\"mock\",\"islandCount\":2,\"maxGenerations\":3,\"stages\":{\"syntax\":true,\"quickRollout\":{\"enabled\":true,\"steps\":50},\"quickGames\":{\"enabled\":true,\"games\":1},\"fullTournament\":{\"enabled\":false,\"games\":0}},\"maxIdleMs\":60000,\"evalTimeoutMs\":60000,\"leaderboardSize\":5}'",
-    "serve": "node --env-file-if-exists=.env --import tsx src/server.ts"
+    "serve": "node --env-file-if-exists=.env --import tsx src/server.ts",
+    "dev": "tsx watch src/server.ts"
   },
   "engines": {
     "node": ">=22.7.0"

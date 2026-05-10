@@ -69,6 +69,11 @@ const els = {
   runStatus: document.getElementById('run-status'),
   startButton: document.getElementById('start-run'),
   stopButton: document.getElementById('stop-run'),
+  refreshModels: document.getElementById('refresh-models'),
+  botSourcePanel: document.getElementById('bot-source-panel'),
+  botSourceName: document.getElementById('bot-source-name'),
+  botSourceCode: document.getElementById('bot-source-code'),
+  copySourceBtn: document.getElementById('copy-source'),
 };
 const ctx = els.canvas.getContext('2d');
 
@@ -273,6 +278,36 @@ function togglePlay() {
 
 // ---- selection -----------------------------------------------------------
 
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function renderBotSource(shipId) {
+  if (!els.botSourcePanel || !els.botSourceName || !els.botSourceCode) return;
+
+  if (!shipId) {
+    els.botSourcePanel.classList.remove('active');
+    return;
+  }
+
+  const bot = leaderboard.find((b) => (b.shipId ?? b.id) === shipId);
+  if (!bot || !bot.source) {
+    els.botSourceName.textContent = shipId;
+    els.botSourceCode.textContent = 'No source code available for this bot.';
+    els.botSourcePanel.classList.add('active');
+    return;
+  }
+
+  els.botSourceName.textContent = `${bot.shipId ?? bot.id} · gen ${bot.metadata?.generation ?? 0} · fitness ${fmt(bot.fitness?.fitnessScore, 3)}`;
+  els.botSourceCode.innerHTML = escapeHtml(bot.source);
+  els.botSourcePanel.classList.add('active');
+}
+
 function selectShip(shipId) {
   if (selectedShipId === shipId) {
     selectedShipId = null;
@@ -280,6 +315,7 @@ function selectShip(shipId) {
     selectedShipId = shipId;
   }
   renderLeaderboard(leaderboard);
+  renderBotSource(selectedShipId);
   rebuildReplayDropdown();
   if (els.replaySelect.options.length > 0) {
     void loadSelectedReplay();
@@ -395,19 +431,114 @@ async function pollRuns() {
   }
 }
 
+let modelFetchStatus = '';
+
+function setModelStatus(msg) {
+  modelFetchStatus = msg;
+  const modelInput = els.runForm?.elements?.namedItem('llmModel');
+  if (modelInput) modelInput.placeholder = msg || 'loading…';
+}
+
+async function fetchModels(baseUrl) {
+  console.log('fetchModels called with baseUrl:', baseUrl);
+  if (!baseUrl || baseUrl === 'mock') {
+    console.log('Early return - baseUrl is empty or mock');
+    return { models: [], error: null };
+  }
+  try {
+    setModelStatus('fetching models…');
+    // Ask our own server to proxy the request; avoids CORS when the LLM
+    // server doesn't send Access-Control-Allow-Origin headers.
+    console.log('Fetching from /api/models');
+    const res = await authedFetch('/api/models');
+    console.log('Response status:', res.status);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const err = body.error?.message || `HTTP ${res.status}`;
+      setModelStatus(`models: ${err}`);
+      return { models: [], error: err };
+    }
+    const body = await res.json();
+    console.log('Response body:', body);
+    const models = (body.data ?? [])
+      .filter((m) => m.object === 'model' || m.id)
+      .map((m) => m.id)
+      .filter(Boolean);
+    console.log('Parsed models:', models.length, models);
+    setModelStatus(`${models.length} models found`);
+    return { models, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('fetchModels error:', msg);
+    setModelStatus(`models: ${msg}`);
+    return { models: [], error: msg };
+  }
+}
+
+function populateModelSelect(models) {
+  console.log('populateModelSelect called with', models?.length, 'models');
+  const select = document.getElementById('model-select');
+  if (!select) {
+    console.error('Select element not found!');
+    return;
+  }
+  // Keep the first "Select a model..." option
+  const placeholder = select.options[0];
+  select.innerHTML = '';
+  select.appendChild(placeholder);
+  
+  if (!models || models.length === 0) {
+    console.log('No models to populate');
+    return;
+  }
+  for (const id of models) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    select.appendChild(opt);
+  }
+  console.log('Populated select with', select.options.length - 1, 'options');
+}
+
+async function refreshModelList() {
+  const baseInput = els.runForm.elements.namedItem('llmBaseUrl');
+  const baseUrl = baseInput?.value?.trim();
+  const { models, error } = await fetchModels(baseUrl);
+  populateModelSelect(models);
+  return { models, error };
+}
+
 async function loadDefaults() {
   try {
     const res = await authedFetch('/api/defaults');
-    if (!res.ok) return;
+    if (!res.ok) {
+      console.error('Failed to load defaults:', res.status);
+      return;
+    }
     const body = await res.json();
-    const modelInput = els.runForm.elements.namedItem('llmModel');
+    console.log('Loaded defaults:', body);
+    const modelSelect = document.getElementById('model-select');
     const baseInput = els.runForm.elements.namedItem('llmBaseUrl');
-    if (modelInput && !modelInput.value) modelInput.value = body.llmModel ?? '';
+    
     if (baseInput && !baseInput.value) baseInput.value = body.llmBaseUrl ?? '';
-    if (modelInput) modelInput.placeholder = body.llmModel ?? '';
     if (baseInput) baseInput.placeholder = body.llmBaseUrl ?? '';
-  } catch {
-    /* leave placeholders */
+    
+    // Store the default model to select after population
+    const defaultModel = body.llmModel ?? '';
+    
+    console.log('About to refresh models with baseUrl:', baseInput?.value);
+    await refreshModelList();
+    
+    // Select the default model if it exists in the list
+    if (modelSelect && defaultModel) {
+      const options = Array.from(modelSelect.options);
+      const match = options.find(opt => opt.value === defaultModel);
+      if (match) {
+        modelSelect.value = defaultModel;
+      }
+    }
+  } catch (err) {
+    console.error('Error in loadDefaults:', err);
   }
 }
 
@@ -478,6 +609,56 @@ els.playPause.addEventListener('click', togglePlay);
 els.runForm.addEventListener('submit', startRun);
 els.stopButton.addEventListener('click', stopRun);
 
+const baseUrlInput = els.runForm.elements.namedItem('llmBaseUrl');
+if (baseUrlInput) {
+  baseUrlInput.addEventListener('change', () => void refreshModelList());
+}
+
+if (els.refreshModels) {
+  els.refreshModels.addEventListener('click', () => void refreshModelList());
+}
+
+if (els.copySourceBtn) {
+  els.copySourceBtn.addEventListener('click', () => {
+    const code = els.botSourceCode?.textContent ?? '';
+    navigator.clipboard.writeText(code).catch(() => {});
+    els.copySourceBtn.textContent = 'copied!';
+    setTimeout(() => { els.copySourceBtn.textContent = '📋'; }, 2000);
+  });
+}
+
 void loadDefaults();
 tick();
 setInterval(tick, POLL_MS);
+
+// ---- live reload (dev mode) ---------------------------------------------
+// Polls /api/state and reloads the page when the server restarts.
+// This pairs with `npm run dev` (tsx watch) so the browser auto-refreshes
+// whenever backend code changes.
+
+const LIVERELOAD_INTERVAL_MS = 3000;
+let lastServerStartTime = null;
+
+async function checkLiveReload() {
+  try {
+    const res = await fetch('/api/state');
+    if (!res.ok) return;
+    const body = await res.json();
+    const startTime = body?.serverStartTime;
+    if (!startTime) return;
+    if (lastServerStartTime && lastServerStartTime !== startTime) {
+      console.log('[livereload] Server restarted — reloading page');
+      window.location.reload();
+      return;
+    }
+    lastServerStartTime = startTime;
+  } catch {
+    // Server might be restarting; check again next interval
+  }
+}
+
+// First check after a short delay to let the page settle.
+setTimeout(() => {
+  void checkLiveReload();
+  setInterval(checkLiveReload, LIVERELOAD_INTERVAL_MS);
+}, 1000);

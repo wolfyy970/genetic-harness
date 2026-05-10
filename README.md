@@ -13,6 +13,7 @@ npm install              # native isolated-vm build, ~1 min first time
 npm test                 # full vitest suite
 npm run smoke            # 3 generations, mock LLM, no network
 npm run serve            # dashboard at http://localhost:3000
+npm run dev              # same as serve but auto-restarts on file changes
 ```
 
 To run with a real LLM (any OpenAI-compatible chat-completions endpoint):

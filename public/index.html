@@ -33,7 +33,12 @@
         </label>
         <label class="wide">
           model
-          <input type="text" name="llmModel" placeholder="loading…" />
+          <span class="input-row">
+            <select name="llmModel" id="model-select">
+              <option value="">Select a model...</option>
+            </select>
+            <button type="button" id="refresh-models" title="Refresh model list">↻</button>
+          </span>
         </label>
         <label class="wide">
           base URL
@@ -70,6 +75,15 @@
           </thead>
           <tbody></tbody>
         </table>
+      </section>
+
+      <section class="panel" id="bot-source-panel">
+        <h2>Bot Source</h2>
+        <div class="bot-source-header">
+          <span id="bot-source-name">—</span>
+          <button type="button" id="copy-source" title="Copy source">📋</button>
+        </div>
+        <pre class="bot-source"><code id="bot-source-code">Click a bot in the leaderboard to inspect its source code.</code></pre>
       </section>
 
       <section class="panel" id="player-panel">

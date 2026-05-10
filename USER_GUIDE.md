@@ -20,6 +20,7 @@ npm test                 # full vitest suite, under 2s
 | `npm run smoke` | 3-generation mock-LLM evolution; completes in ~1s. |
 | `npm run run -- '<json-config>'` | Run with custom JSON-overrides. |
 | `npm run serve` | Start the dashboard (HTTP server). |
+| `npm run dev` | Start the dashboard with `tsx watch` — auto-restarts the server when `.ts` files change. The browser auto-refreshes via a live-reload poll. |
 
 `runEvolution` calls `setLeaderboard()` after every generation, so the dashboard reflects live progress when `npm run serve` and a run share the same Node process. When the run is in a separate process (e.g. spawned via `POST /api/runs`), the server falls back to reading `<archiveDir>/leaderboard.json` from disk. `PORT` env var picks the listen port (default 3000).
 
@@ -123,7 +124,7 @@ Enable replay recording with `recordReplays: true` in your config (or via the da
 
 Open `npm run serve` in one shell, your run in another (or via the dashboard's run-control form), and visit `http://localhost:3000`. The dashboard polls `/api/manifest` + `/api/leaderboard` every 2s; replays appear in the dropdown as they land.
 
-The replay player exposes the canonical `BotState` view via the per-tick `arena.renderer(state) → ReplayFrame` boundary — it shows positions and orientations, not internal velocities or fuel. Click a leaderboard row to filter the replay dropdown to that bot's matches; click a MAP-Elites cell to load the elite of that cell.
+The replay player exposes the canonical `BotState` view via the per-tick `arena.renderer(state) → ReplayFrame` boundary — it shows positions and orientations, not internal velocities or fuel. Click a leaderboard row to filter the replay dropdown to that bot's matches, reveal the bot's source code in the **Bot Source** panel, and click a MAP-Elites cell to load the elite of that cell.
 
 ## Remote control
 
@@ -135,6 +136,8 @@ The dashboard ships with a small run-control surface so the heavy machine runnin
 - `GET /api/runs/:id/log` returns the tail of stdout/stderr.
 - `DELETE /api/runs/:id` sends SIGINT.
 - `GET /api/defaults` returns the active `llmModel` / `llmBaseUrl` (so the dashboard form pre-populates from your `.env`) plus an `apiKeyConfigured` boolean. The API key itself is never sent over the wire.
+- `GET /api/models` proxies the models list from the configured LLM server so the dashboard can populate the model dropdown without hitting CORS.
+- `GET /api/state` returns server status including `serverStartTime` (used by the live-reload script).
 
 The run-control form on the dashboard exposes generations, islands, mode, model, base URL, record-replays, and a mock-LLM toggle. Model + base URL pre-fill from `/api/defaults` on page load; you can override either per-run. The API key stays in `.env` (`HARNESS_LLM_API_KEY`) and is inherited by the spawned orchestrator child process.
 
