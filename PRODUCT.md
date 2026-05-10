@@ -2,7 +2,7 @@
 
 ## What this is
 
-A **genetic harness** — a research substrate that uses an LLM as the variation operator inside an asynchronous evolutionary loop. The LLM proposes edits to a JavaScript bot controller; a sandboxed evaluator scores it by playing matches against a frozen reference roster; survivors enter a MAP-Elites archive and seed the next generation. The harness is the surrounding plumbing: sandbox, fitness function, archive, scheduler, and CLI. The LLM is the only mutation source.
+A **genetic harness** — a research substrate that uses an LLM as the variation operator inside an asynchronous evolutionary loop. The LLM proposes edits to a JavaScript bot controller; a sandboxed evaluator scores it by playing matches against a frozen reference roster; survivors enter a MAP-Elites archive and seed the next generation. The harness is the surrounding plumbing: sandbox, fitness function, archive, scheduler, CLI, and a small dashboard for replays + run control. The LLM is the only mutation source.
 
 ## Who it's for
 
@@ -32,8 +32,14 @@ Three observations in the literature converge on this design:
 ## What this is *not*
 
 - **Not a Claude-Code-style coding agent.** The harness uses one-shot LLM mutations; Self-Debugging compile-retry is the only feedback loop. Agentic per-bot authoring (CodeClash's pattern) is the opposite shape and not in scope.
-- **Not a tournament platform.** No public leaderboard, no submission API, no anti-cheat. The reference roster is for fitness signal, not competition.
+- **Not a tournament platform.** No public leaderboard, no submission API, no anti-cheat. The reference roster is for fitness signal, not competition. The dashboard is single-user.
 - **Not a substitute for live human play.** Per CodeClash's headline finding, frontier LLMs lose every round against expert humans; the harness produces interesting controllers within a fixed compute regime, not strong general agents.
+
+## Visualization
+
+A vanilla-JS dashboard ships with the harness so users can actually *see* evolution happen rather than reading JSON logs. Three panels: a live leaderboard, a replay player (canvas, scrubber, dropdown), and the MAP-Elites grid heatmap with generation-over-time charts. Replays are recorded opt-in (`recordReplays: true`) for the top-N elites of each generation against each reference opponent — a "highlight reel" that bounds disk use. Per-arena viewer modules (`public/viewers/<arena>.js`) mirror the server-side `arena.renderer(state) → ReplayFrame` boundary, so adding a new arena = two files.
+
+The dashboard also exposes a small **run-control API** (`POST /api/runs`, etc.) so a user can run the heavy orchestrator on one machine (e.g. a Mac Studio) and drive it from a browser on another (e.g. a laptop). Bearer-token auth + bind-host policy keep the unauth'd surface restricted to localhost.
 
 ## Where this fits in the literature
 

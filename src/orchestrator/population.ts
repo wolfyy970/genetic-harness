@@ -24,6 +24,18 @@ interface EliteCell {
 }
 
 /**
+ * One entry in `Population.getGridSnapshot()`. The dashboard renders a
+ * 4 × 8 heatmap (aggression × log-fuel) coloured by `fitness`.
+ */
+export interface GridCellSnapshot {
+  aggressionBucket: number;
+  fuelBucket: number;
+  fitness: number;
+  shipId: string;
+  generation: number;
+}
+
+/**
  * An island of candidates with its own MAP-Elites grid.
  *
  * Each island maintains a grid indexed by behavioral axes (strategy bucket,
@@ -238,6 +250,33 @@ export class Population {
       }
     }
     return archive;
+  }
+
+  /**
+   * Snapshot the MAP-Elites grid as a flat array for the dashboard's
+   * heatmap. One entry per occupied cell, deduplicated to the elite per
+   * (aggression bucket × fuel bucket) pair globally — when two islands
+   * happen to share the same cell, the higher-fitness elite wins.
+   */
+  getGridSnapshot(): GridCellSnapshot[] {
+    const merged = new Map<string, GridCellSnapshot>();
+    for (const island of this.islands) {
+      for (const [key, cell] of island.grid) {
+        const [a, f] = key.split('-').map((n) => parseInt(n, 10));
+        const candidate: GridCellSnapshot = {
+          aggressionBucket: a,
+          fuelBucket: f,
+          fitness: cell.bot.fitness.fitnessScore,
+          shipId: cell.bot.shipId,
+          generation: cell.bot.metadata.generation,
+        };
+        const existing = merged.get(key);
+        if (!existing || candidate.fitness > existing.fitness) {
+          merged.set(key, candidate);
+        }
+      }
+    }
+    return Array.from(merged.values());
   }
 
   /** Population summary stats */

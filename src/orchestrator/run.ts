@@ -30,6 +30,13 @@ import { IsolatePool, type CompiledBot } from '../runtime/isolate.js';
 import { HeartbeatMonitor } from './heartbeat.js';
 import { getArena } from '../arena/interface.js';
 import '../arena/asteroids.js';
+import {
+  writeLeaderboard,
+  appendGenerationToManifest,
+  pruneOldGenerations,
+} from '../replay/store.js';
+import { recordEliteReplays, sanitizeConfig } from '../replay/elite-replays.js';
+import { setLeaderboard } from '../server.js';
 
 /** Zero-fitness placeholder used while a seed bot is awaiting evaluation. */
 function zeroFitness(shipId: string): FitnessResult {
@@ -197,6 +204,7 @@ export async function runEvolution(
   }
 
   const evalOpts = { pool, referenceRoster, ownPool: false };
+  const runId = `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 
   // Seed each island with one basic bot, evaluated up front so MAP-Elites
   // placement is meaningful from generation 0.
@@ -334,6 +342,75 @@ export async function runEvolution(
     }
 
     generation++;
+
+    // Snapshot the leaderboard so the HTTP UI sees per-generation progress.
+    const snapshot = population
+      .getArchive()
+      .sort((a, b) => b.fitness.fitnessScore - a.fitness.fitnessScore)
+      .slice(0, config.leaderboardSize);
+    setLeaderboard(snapshot);
+    try {
+      writeLeaderboard(config.archiveDir, snapshot);
+    } catch (err) {
+      logger.warn({ err }, 'Failed to persist leaderboard.json');
+    }
+
+    // Replay recording (opt-in): re-run top-N elites against each non-null
+    // reference opponent with frame capture, persist to disk, append to
+    // manifest. Adds ~few hundred ms / generation; disabled by default.
+    if (config.recordReplays) {
+      try {
+        const elites = population.getTopK(config.replayCount);
+        const entry = recordEliteReplays({
+          arena,
+          arenaName: config.arena,
+          pool,
+          referenceRoster,
+          elites,
+          generation: generation - 1,
+          archiveDir: config.archiveDir,
+          config,
+        });
+
+        // Per-generation rollup for the chart panel.
+        const archive = population.getArchive();
+        const meanFitness =
+          archive.length > 0
+            ? archive.reduce((s, b) => s + b.fitness.fitnessScore, 0) / archive.length
+            : 0;
+        const meanFuel =
+          archive.length > 0
+            ? archive.reduce((s, b) => s + b.fitness.avgFuelPerTick, 0) / archive.length
+            : 0;
+        const bestEntry = snapshot[0];
+        const stats = {
+          generation: generation - 1,
+          bestFitness: bestEntry?.fitness.fitnessScore ?? 0,
+          bestWinRate: bestEntry?.fitness.winRate ?? 0,
+          meanFitness,
+          meanFuel,
+          archiveSize: archive.length,
+        };
+
+        appendGenerationToManifest(config.archiveDir, {
+          runId,
+          arena: config.arena,
+          sanitizedConfig: sanitizeConfig(config),
+          entry,
+          leaderboard: snapshot,
+          mapElitesGrid: population.getGridSnapshot(),
+          generationStats: stats,
+        });
+
+        // Bound disk usage by pruning generation directories beyond the
+        // configured rolling window.
+        if (config.replayKeepGenerations > 0) {
+          pruneOldGenerations(config.archiveDir, config.replayKeepGenerations);
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Replay recording failed for this generation');
+      }
+    }
 
     // Log progress
     const best = population.getBest();

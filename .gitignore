@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .hermes/kanban.db
+data/
 *_test.ts
 *_check.ts
 *_full_test.ts

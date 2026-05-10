@@ -422,6 +422,17 @@ export interface HarnessConfig {
   // Archive
   archiveDir: string;
   leaderboardSize: number;
+
+  // Replay recording (default off; opt-in)
+  recordReplays: boolean;
+  /** Top-N elites per generation that get a recorded match against each reference opponent. */
+  replayCount: number;
+  /** Hard cap on stored frames per match. ~1500 ≈ 75s at 50ms ticks. */
+  replayMaxFrames: number;
+  /** Sample one frame every N ticks. 1 = every tick. */
+  replaySampleEvery: number;
+  /** Rolling window: older generations get pruned. (Slice 6.) */
+  replayKeepGenerations: number;
 }
 
 /**
@@ -482,4 +493,9 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   evalTimeoutMs: 60_000,
   archiveDir: './data/archive',
   leaderboardSize: 50,
+  recordReplays: false,
+  replayCount: 2,
+  replayMaxFrames: 1500,
+  replaySampleEvery: 1,
+  replayKeepGenerations: 20,
 };

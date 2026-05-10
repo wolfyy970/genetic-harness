@@ -23,6 +23,7 @@ import type {
 } from '../shared/types.js';
 import { buildBotState } from '../engine/world.js';
 import type { CompiledBot, IsolatePool } from '../runtime/isolate.js';
+import type { MatchRecorder } from '../replay/recorder.js';
 
 /** Counts of each action type emitted by a single ship over a match. */
 export interface ActionHistogram {
@@ -93,6 +94,9 @@ function recordAction(h: ActionHistogram, action: BotAction | null): void {
  * @param config      Concrete GameConfig the arena should init with.
  * @param maxTicks    Hard cap on match duration.
  * @param cpuBudgetMs Per-tick CPU timeout for each bot's runTick call.
+ * @param recorder    Optional. Receives `onTick(state)` after each
+ *                    `arena.tick`. Hot-path cost is one branch per tick
+ *                    when absent.
  */
 export function playMatch(
   arena: ArenaPlugin,
@@ -101,6 +105,7 @@ export function playMatch(
   config: GameConfig,
   maxTicks: number,
   cpuBudgetMs: number,
+  recorder?: MatchRecorder,
 ): MatchReport {
   let state: GameState = arena.init(config);
 
@@ -161,6 +166,7 @@ export function playMatch(
     }
 
     state = arena.tick(state, actions);
+    if (recorder) recorder.onTick(state);
   }
 
   // Final scoring + survival snapshot.

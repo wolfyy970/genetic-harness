@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>genetic-harness</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>genetic-harness</h1>
+      <div class="status" id="status">loading…</div>
+    </header>
+
+    <section class="panel run-control" id="run-panel">
+      <h2>Run control</h2>
+      <form id="run-form">
+        <label>
+          generations
+          <input type="number" name="maxGenerations" value="3" min="1" max="500" />
+        </label>
+        <label>
+          islands
+          <input type="number" name="islandCount" value="2" min="1" max="8" />
+        </label>
+        <label>
+          mode
+          <select name="mode">
+            <option value="pure">pure</option>
+            <option value="pareto">pareto</option>
+            <option value="capped">capped</option>
+            <option value="weighted">weighted</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" name="recordReplays" checked />
+          record replays
+        </label>
+        <label class="check">
+          <input type="checkbox" name="useMockLLM" checked />
+          mock LLM
+        </label>
+        <button type="submit" id="start-run">Start run</button>
+        <button type="button" id="stop-run" disabled>Stop</button>
+      </form>
+      <div class="run-status" id="run-status">no active run</div>
+    </section>
+
+    <main class="grid">
+      <section class="panel" id="leaderboard-panel">
+        <h2>Leaderboard</h2>
+        <table id="leaderboard">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>shipId</th>
+              <th>fitness</th>
+              <th>winRate</th>
+              <th>fuel ns/tick</th>
+              <th>matches</th>
+              <th>gen</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="panel" id="player-panel">
+        <h2>Replay</h2>
+        <div class="replay-controls">
+          <select id="replay-select"></select>
+          <button id="play-pause" type="button">▶</button>
+          <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
+          <span class="status" id="frame-info">—</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="canvas" width="800" height="600"></canvas>
+        </div>
+        <div class="legend" id="legend"></div>
+      </section>
+
+      <section class="panel" id="grid-panel">
+        <h2>MAP-Elites grid · aggression × log&nbsp;fuel</h2>
+        <div id="grid" class="grid-heatmap"></div>
+        <div class="grid-axes">
+          <span>aggression ↑</span>
+          <span>log fuel/tick →</span>
+        </div>
+      </section>
+
+      <section class="panel" id="charts-panel">
+        <h2>Generation curves</h2>
+        <div class="chart-row">
+          <div>
+            <div class="chart-label">winRate per generation</div>
+            <svg id="chart-winrate" class="chart"></svg>
+          </div>
+          <div>
+            <div class="chart-label">fuel ns/tick vs fitness</div>
+            <svg id="chart-scatter" class="chart"></svg>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

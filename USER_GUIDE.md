@@ -19,9 +19,9 @@ npm test                 # full vitest suite, under 2s
 | `npm run build` | `tsc` — emits compiled JS into `tsconfig.outDir`. |
 | `npm run smoke` | 3-generation mock-LLM evolution; completes in ~1s. |
 | `npm run run -- '<json-config>'` | Run with custom JSON-overrides. |
-| `npm run serve` | Start the read-only HTTP server (see below). |
+| `npm run serve` | Start the dashboard (HTTP server). |
 
-The HTTP server in [src/server.ts](src/server.ts) is a stub: routes `GET /api/leaderboard`, `GET /api/state`, `GET /`. The leaderboard is exposed via an exported `setLeaderboard(data)` but **`runEvolution` does not currently call it**, so the served leaderboard is always empty until that wiring lands. `PORT` env var picks the listen port (default 3000).
+`runEvolution` calls `setLeaderboard()` after every generation, so the dashboard reflects live progress when `npm run serve` and a run share the same Node process. When the run is in a separate process (e.g. spawned via `POST /api/runs`), the server falls back to reading `<archiveDir>/leaderboard.json` from disk. `PORT` env var picks the listen port (default 3000).
 
 ## Configuration
 
@@ -39,6 +39,8 @@ Key fields:
 | `λ` | — | weighted-mode penalty. |
 | `arena` | `asteroids` | Arena name registered via `registerArena`. |
 | `arenaConfig` | `{}` | Partial `GameConfig` merged into evaluation matches. |
+| `archiveDir` | `./data/archive` | Where leaderboard, manifest, and replays live. |
+| `leaderboardSize` | 50 | Top-N persisted to `leaderboard.json`. |
 | `llmBaseUrl` | `http://localhost:8000/v1` | Set to `mock` to bypass the network. |
 | `llmModel` | `Qwen3.6-35B-A3B-8bit` | Any chat-completions-compatible model name. |
 | `llmApiKey` | `omlx-local` | Sent as `Bearer <key>`. |
@@ -46,6 +48,11 @@ Key fields:
 | `evalTimeoutMs` | 60_000 | Per-evaluation timeout. |
 | `maxIdleMs` | 30_000 | Heartbeat stall threshold. |
 | `stages` | (full cascade) | Toggle per stage; see below. |
+| `recordReplays` | `false` | Master toggle for replay capture. Smoke unchanged when off. |
+| `replayCount` | 2 | Top-N elites per generation that get a recorded match against each non-null reference opponent. |
+| `replayMaxFrames` | 1500 | Hard cap on stored frames per match (~75s @ 50ms tick). |
+| `replaySampleEvery` | 1 | Sample every Nth tick. |
+| `replayKeepGenerations` | 20 | Rolling window; older `gen-NNNN/` directories are pruned. |
 
 The cascade currently has three stages:
 
@@ -63,6 +70,10 @@ The `stages.syntax` field is currently a no-op — the compile gate is unconditi
 |---|---|
 | `LLM_MOCK=1` | Force mock-LLM mode regardless of `llmBaseUrl`. |
 | `DEBUG` | Any truthy value enables `logger.debug(...)` output. |
+| `PORT` | Server listen port. Default `3000`. |
+| `HARNESS_HOST` | Server bind host. Default `127.0.0.1`. Setting to a non-loopback host requires `HARNESS_TOKEN`. |
+| `HARNESS_TOKEN` | Bearer token gating `/api/*`. When unset, no auth (loopback only). |
+| `HARNESS_ARCHIVE_DIR` | Override the dashboard's archive root. Default `./data/archive`. |
 
 ## LLM modes
 
@@ -95,15 +106,53 @@ The bot runs inside an isolated-vm context with deterministic globals. **Availab
 
 Reference bots in [src/orchestrator/reference.ts](src/orchestrator/reference.ts) (Null / Random / Aggressive / Evasive) are the canonical examples.
 
+## Replay UI
+
+Enable replay recording with `recordReplays: true` in your config (or via the dashboard's run-control form). After each generation the orchestrator:
+
+1. Picks the top-`replayCount` elites.
+2. Re-runs each elite against every non-null reference opponent with a `JsonReplayRecorder` attached.
+3. Writes each match as JSON under `<archiveDir>/generations/gen-NNNN/<matchId>.json`.
+4. Appends an entry to `<archiveDir>/manifest.json` (which also tracks `mapElitesGrid` and `generationStats`).
+5. Prunes generation directories beyond `replayKeepGenerations`.
+
+Open `npm run serve` in one shell, your run in another (or via the dashboard's run-control form), and visit `http://localhost:3000`. The dashboard polls `/api/manifest` + `/api/leaderboard` every 2s; replays appear in the dropdown as they land.
+
+The replay player exposes the canonical `BotState` view via the per-tick `arena.renderer(state) → ReplayFrame` boundary — it shows positions and orientations, not internal velocities or fuel. Click a leaderboard row to filter the replay dropdown to that bot's matches; click a MAP-Elites cell to load the elite of that cell.
+
+## Remote control
+
+The dashboard ships with a small run-control surface so the heavy machine running evolution doesn't have to be the same machine you're looking at the UI on:
+
+- `POST /api/runs` (body: HarnessConfig overrides) spawns the orchestrator as a child process. One active run at a time; subsequent calls return HTTP 409.
+- `GET /api/runs` lists active and recent runs.
+- `GET /api/runs/:id/status` returns the current state (`running` / `exited` / `error`) and process exit code.
+- `GET /api/runs/:id/log` returns the tail of stdout/stderr.
+- `DELETE /api/runs/:id` sends SIGINT.
+
+Recommended setup for a workstation + remote box:
+
+```bash
+# On the heavy box (e.g. Mac Studio):
+HARNESS_HOST=0.0.0.0 HARNESS_TOKEN=$(openssl rand -hex 16) npm run serve
+
+# On the laptop:
+open http://<heavy-box>:3000
+# Browser prompts once for the token; it's stored in localStorage.
+```
+
+The server refuses to start when bound to a non-loopback host without a `>=16-char` `HARNESS_TOKEN`. Token comparison is constant-time. There's no multi-user notion — this is a single-operator dashboard.
+
 ## Extending
 
 ### Add an arena
 
-1. Implement the `ArenaPlugin` interface from [src/shared/types.ts](src/shared/types.ts): `init / tick / score / renderer`.
-2. Register it: `registerArena('myarena', myPlugin)`. Side-effect import the file from your entry point.
-3. Set `arena: 'myarena'` in the config.
+Adding a new arena is two files:
 
-The Asteroids arena ([src/arena/asteroids.ts](src/arena/asteroids.ts)) is the working example.
+1. **Server side**: implement the `ArenaPlugin` interface from [src/shared/types.ts](src/shared/types.ts): `init / tick / score / renderer`. Register it: `registerArena('myarena', myPlugin)`. Side-effect import the file from your entry point. Set `arena: 'myarena'` in the config.
+2. **Client side**: drop a viewer module at `public/viewers/myarena.js` exporting `paint(ctx, frame, meta)`, `dimensions: { width, height }`, and `legend()`. The dashboard loads it dynamically based on `manifest.arena`.
+
+The Asteroids arena pair ([src/arena/asteroids.ts](src/arena/asteroids.ts) + [public/viewers/asteroids.js](public/viewers/asteroids.js)) is the working example.
 
 ### Add a fitness mode
 

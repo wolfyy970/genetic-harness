@@ -99,3 +99,43 @@ describe('Population MAP-Elites grid', () => {
     expect(best?.id).toBe('b');
   });
 });
+
+describe('Population.getGridSnapshot', () => {
+  it('returns one entry per occupied (aggression, fuel) cell', () => {
+    const pop = new Population({ islandCount: 1, migrationInterval: 1000 });
+    pop.addCandidate(bot('a', fitness({ aggression: 0.1, avgFuelPerTick: 10, fitnessScore: 0.2 })));
+    pop.addCandidate(bot('b', fitness({ aggression: 0.6, avgFuelPerTick: 1_000_000, fitnessScore: 0.4 })));
+    pop.addCandidate(bot('c', fitness({ aggression: 0.95, avgFuelPerTick: 50, fitnessScore: 0.6 })));
+    const snap = pop.getGridSnapshot();
+    expect(snap.length).toBe(3);
+    const buckets = snap
+      .map((s) => `${s.aggressionBucket}-${s.fuelBucket}`)
+      .sort();
+    expect(buckets.length).toBe(3);
+  });
+
+  it('keeps the higher-fitness elite when two islands share a cell', () => {
+    const pop = new Population({ islandCount: 2, migrationInterval: 1000 });
+    // Both bots land in (aggression=0, fuel=0) but island assignment uses
+    // smallest-island rule, so they end up on different islands. Then we
+    // also add a stronger duplicate bot via a follow-up add — verify the
+    // global snapshot reports the higher one.
+    pop.addCandidate(bot('weak', fitness({ aggression: 0.0, avgFuelPerTick: 0, fitnessScore: 0.1 })));
+    pop.addCandidate(bot('strong', fitness({ aggression: 0.0, avgFuelPerTick: 0, fitnessScore: 0.9 })));
+    const snap = pop.getGridSnapshot();
+    // Both bots compete for (0, 0); the snapshot dedups to 1 cell.
+    expect(snap.length).toBe(1);
+    expect(snap[0].shipId).toBe('strong');
+  });
+
+  it('includes fitness, shipId, and generation per cell', () => {
+    const pop = new Population({ islandCount: 1, migrationInterval: 1000 });
+    pop.addCandidate(bot('a', fitness({ aggression: 0.5, avgFuelPerTick: 100, fitnessScore: 0.5 })));
+    const snap = pop.getGridSnapshot();
+    expect(snap[0].shipId).toBe('a');
+    expect(snap[0].generation).toBe(0);
+    expect(snap[0].fitness).toBeCloseTo(0.5);
+    expect(snap[0].aggressionBucket).toBeGreaterThanOrEqual(0);
+    expect(snap[0].fuelBucket).toBeGreaterThanOrEqual(0);
+  });
+});

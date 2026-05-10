@@ -25,20 +25,58 @@ src/
 │   ├── deterministic.ts JS snippet that strips Math.random / Date.now / timers /
 │   │                    network. Eval'd inside the bot's context.
 │   └── bundler.ts       esbuild → IIFE that assigns globalThis.tick.
-└── orchestrator/        Evolutionary loop and everything around it.
-    ├── reference.ts     Frozen reference roster (Null, Random, Aggressive, Evasive).
-    ├── match.ts         playMatch: runs N bots through the IsolatePool tick by tick;
-    │                    tracks per-ship CPU + action histogram + score + survival.
-    ├── evaluator.ts     Cascade: compile gate → smoke vs Null → round-robin against
-    │                    reference roster (3 seeds each). Mode (pure/pareto/capped/
-    │                    weighted) selects fitnessScore in buildFitnessFromStats.
-    ├── mutation.ts      generateMutation (live LLM or mock) +
-    │                    generateMutationWithRetry (Self-Debugging compile-retry).
-    ├── population.ts    Island MAP-Elites; cell key = (aggression × log fuel/tick).
-    ├── heartbeat.ts     Per-task stall detector with progress messages.
-    └── run.ts           runEvolution: seed → mutate → evaluate → migrate → repeat.
-                         CLI entry. Returns EvolutionSummary; no process.exit
-                         outside the CLI guard.
+├── orchestrator/        Evolutionary loop and everything around it.
+│   ├── reference.ts     Frozen reference roster (Null, Random, Aggressive, Evasive).
+│   ├── match.ts         playMatch: runs N bots through the IsolatePool tick by tick;
+│   │                    tracks per-ship CPU + action histogram + score + survival.
+│   │                    Optional `recorder?` participates after each arena.tick.
+│   ├── evaluator.ts     Cascade: compile gate → smoke vs Null → round-robin against
+│   │                    reference roster (3 seeds each). Mode (pure/pareto/capped/
+│   │                    weighted) selects fitnessScore in buildFitnessFromStats.
+│   ├── mutation.ts      generateMutation (live LLM or mock) +
+│   │                    generateMutationWithRetry (Self-Debugging compile-retry).
+│   ├── population.ts    Island MAP-Elites; cell key = (aggression × log fuel/tick).
+│   │                    getGridSnapshot() exposes the grid for the dashboard.
+│   ├── heartbeat.ts     Per-task stall detector with progress messages.
+│   └── run.ts           runEvolution: seed → mutate → evaluate → migrate → repeat.
+│                        Persists leaderboard.json + manifest.json per generation;
+│                        invokes recordEliteReplays when recordReplays is on.
+│                        CLI entry. Returns EvolutionSummary.
+├── replay/              Replay recording + on-disk archive layout.
+│   ├── types.ts         ReplayFile, ReplayManifest, ReplayManifestEntry,
+│   │                    GenerationStats, ReplayParticipant.
+│   ├── recorder.ts      MatchRecorder interface + JsonReplayRecorder (frame
+│   │                    sampling, max-frame cap, finalize-from-MatchReport).
+│   ├── elite-replays.ts recordEliteReplays(): top-N elites × non-null roster,
+│   │                    each match runs through playMatch with a recorder,
+│   │                    written to disk + manifest entry returned.
+│   └── store.ts         leaderboard / replay / manifest IO; safeArchivePath
+│                        path-traversal guard; pruneOldGenerations rolling window.
+├── server.ts            HTTP server. Static (/), /static/*, JSON API
+│                        (/api/leaderboard, /api/manifest, /api/replays/:gen/:id,
+│                        /api/runs CRUD, /api/state). Optional bearer-token auth.
+│                        Only listens when invoked as the main module.
+└── server/
+    ├── auth.ts          isAuthorized middleware + validateBindHost. Reads
+    │                    HARNESS_TOKEN; constant-time compare.
+    └── run-manager.ts   RunManager: spawn/list/log/stop child orchestrator
+                         processes. Single active run; in-memory ring-buffer log.
+```
+
+Client side (vanilla JS, no bundler):
+
+```
+public/
+├── index.html        Dashboard layout: run-control header, leaderboard,
+│                     replay player, MAP-Elites grid, generation charts.
+├── styles.css        Minimal palette; CSS-grid layout.
+├── app.js            Manifest fetcher, leaderboard table, replay player
+│                     state machine (RAF loop, scrubber), grid+chart renderers,
+│                     run-control form, bearer-token storage.
+├── charts.js         Tiny SVG primitives: lineChart, scatter, gridHeatmap.
+└── viewers/
+    ├── asteroids.js  paint(ctx, frame, meta) + dimensions + legend.
+    └── asteroids.d.ts Type declarations for the viewer contract.
 ```
 
 ## Data flow per generation
@@ -100,6 +138,22 @@ All four modes route through `buildFitnessFromStats(stats, mode, config)` in [ev
 4. **Mode is a fitness concern, not a population concern.** The MAP-Elites grid keys on `(aggression, log fuel)` always. Mode reshapes ranking without reshaping search topology.
 
 5. **`isolated-vm` default-imported.** Use `import ivm from 'isolated-vm'` (default), not `import * as ivm`. Under raw Node ESM, the namespace import exposes the constructor at `ivm.default.Isolate`; vitest's CJS interop is more forgiving and masks the bug.
+
+## Replay & visualization
+
+The same `arena.renderer(state) → ReplayFrame` boundary that underpins the engine drives the dashboard. A `JsonReplayRecorder` (in `src/replay/recorder.ts`) implements the `MatchRecorder` interface that `playMatch` accepts as an optional last parameter. When recording is enabled, after each generation the orchestrator picks the top-N elites and re-runs each one against every non-null reference opponent with a recorder attached; the resulting `ReplayFile` JSON is written to `<archiveDir>/generations/gen-NNNN/<matchId>.json` and an entry is appended to `<archiveDir>/manifest.json`. Old generations are pruned by `pruneOldGenerations(archiveDir, replayKeepGenerations)` to bound disk use.
+
+The dashboard ([public/](public/)) is a single static page served by `src/server.ts`. Each arena ships a paired client viewer at `public/viewers/<arena>.js` exporting `paint(ctx, frame, meta)` + `dimensions` + `legend`; the page loads it dynamically from `manifest.arena`. Adding a new arena = `src/arena/<name>.ts` (server side) + `public/viewers/<name>.js` (client side). No registry on either side.
+
+Per-generation rollups (`bestFitness`, `bestWinRate`, `meanFitness`, `meanFuel`, `archiveSize`) are written to `manifest.generationStats` and feed the line + scatter charts. The MAP-Elites grid is mirrored into `manifest.mapElitesGrid` so the heatmap renders from a single fetch.
+
+## Remote orchestration
+
+Compute and view live in separate processes by design. The orchestrator (`runEvolution`) runs as a CLI or as a child process spawned by the server (`POST /api/runs`). The server tracks live runs via `RunManager` (in-memory ring-buffer log, lifecycle events from the child process, single-active-run constraint surfaced as HTTP 409). The orchestrator's `archiveDir` is the source of truth for everything else — replays, leaderboard, manifest — so the dashboard polls disk regardless of whether the run is in-process or remote.
+
+Auth is opt-in via `HARNESS_TOKEN`. When unset, the server binds `127.0.0.1` only. When a non-loopback `HARNESS_HOST` is requested without a `>=16-char` token, the server refuses to start. Token comparison is constant-time (`crypto.timingSafeEqual`).
+
+The intended deployment: heavy box (e.g. Mac Studio) runs `HARNESS_HOST=0.0.0.0 HARNESS_TOKEN=$(openssl rand -hex 16) npm run serve`; the laptop hits `http://<host>:3000`, pastes the token, starts/stops runs from the dashboard's run-control form, and watches replays as they land. Single user, no anti-cheat, no multi-tenant.
 
 ## Phase 2: AssemblyScript-on-Wasmtime substrate
 
