@@ -276,6 +276,7 @@ tbody tr.selected {
 }
 
 #run-form input[type='number'],
+#run-form input[type='text'],
 #run-form select {
   background: var(--bg);
   color: var(--text);
@@ -284,6 +285,10 @@ tbody tr.selected {
   padding: 4px 8px;
   font: inherit;
   width: 100px;
+}
+
+#run-form label.wide input {
+  width: 240px;
 }
 
 #run-form button {

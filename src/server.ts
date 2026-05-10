@@ -21,6 +21,7 @@ import { join, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ArchivedBot } from './shared/types.js';
 import { loadLeaderboard, loadManifest, readReplay } from './replay/store.js';
+import { loadConfig } from './shared/config.js';
 import { RunManager } from './server/run-manager.js';
 import { isAuthorized, getAuthToken, validateBindHost } from './server/auth.js';
 
@@ -267,6 +268,21 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
   if (runLog) {
     const tail = runManager.log(decodeURIComponent(runLog[1]), 200);
     sendJson(res, 200, { lines: tail });
+    return;
+  }
+
+  if (url.pathname === '/api/defaults') {
+    // Surface the config defaults the dashboard form needs to pre-populate
+    // model + base URL inputs. The API key is intentionally NEVER sent
+    // over the wire — keep it env-only.
+    const config = loadConfig();
+    sendJson(res, 200, {
+      llmModel: config.llmModel,
+      llmBaseUrl: config.llmBaseUrl,
+      apiKeyConfigured: Boolean(config.llmApiKey && config.llmApiKey.length > 0),
+      mode: config.mode,
+      arena: config.arena,
+    });
     return;
   }
 

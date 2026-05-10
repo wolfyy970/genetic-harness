@@ -134,6 +134,9 @@ The dashboard ships with a small run-control surface so the heavy machine runnin
 - `GET /api/runs/:id/status` returns the current state (`running` / `exited` / `error`) and process exit code.
 - `GET /api/runs/:id/log` returns the tail of stdout/stderr.
 - `DELETE /api/runs/:id` sends SIGINT.
+- `GET /api/defaults` returns the active `llmModel` / `llmBaseUrl` (so the dashboard form pre-populates from your `.env`) plus an `apiKeyConfigured` boolean. The API key itself is never sent over the wire.
+
+The run-control form on the dashboard exposes generations, islands, mode, model, base URL, record-replays, and a mock-LLM toggle. Model + base URL pre-fill from `/api/defaults` on page load; you can override either per-run. The API key stays in `.env` (`HARNESS_LLM_API_KEY`) and is inherited by the spawned orchestrator child process.
 
 Recommended setup for a workstation + remote box:
 

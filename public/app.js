@@ -395,15 +395,38 @@ async function pollRuns() {
   }
 }
 
+async function loadDefaults() {
+  try {
+    const res = await authedFetch('/api/defaults');
+    if (!res.ok) return;
+    const body = await res.json();
+    const modelInput = els.runForm.elements.namedItem('llmModel');
+    const baseInput = els.runForm.elements.namedItem('llmBaseUrl');
+    if (modelInput && !modelInput.value) modelInput.value = body.llmModel ?? '';
+    if (baseInput && !baseInput.value) baseInput.value = body.llmBaseUrl ?? '';
+    if (modelInput) modelInput.placeholder = body.llmModel ?? '';
+    if (baseInput) baseInput.placeholder = body.llmBaseUrl ?? '';
+  } catch {
+    /* leave placeholders */
+  }
+}
+
 async function startRun(event) {
   event.preventDefault();
   const form = new FormData(els.runForm);
+  const useMock = form.get('useMockLLM') === 'on';
+  const llmModel = (form.get('llmModel') ?? '').toString().trim();
+  const llmBaseUrl = (form.get('llmBaseUrl') ?? '').toString().trim();
   const overrides = {
     maxGenerations: Number(form.get('maxGenerations')) || 3,
     islandCount: Number(form.get('islandCount')) || 2,
     mode: form.get('mode') ?? 'pure',
     recordReplays: form.get('recordReplays') === 'on',
-    llmBaseUrl: form.get('useMockLLM') === 'on' ? 'mock' : undefined,
+    // Mock mode wins over llmBaseUrl: when checked, force the mock mutator;
+    // otherwise pass the user's chosen baseUrl + model verbatim. Empty
+    // strings fall through to the env / DEFAULT_CONFIG layers.
+    llmBaseUrl: useMock ? 'mock' : llmBaseUrl || undefined,
+    llmModel: useMock ? undefined : llmModel || undefined,
     stages: {
       syntax: true,
       quickRollout: { enabled: true, steps: 50 },
@@ -455,5 +478,6 @@ els.playPause.addEventListener('click', togglePlay);
 els.runForm.addEventListener('submit', startRun);
 els.stopButton.addEventListener('click', stopRun);
 
+void loadDefaults();
 tick();
 setInterval(tick, POLL_MS);

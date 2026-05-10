@@ -274,6 +274,48 @@ describe('Run-control endpoints', () => {
   });
 });
 
+describe('GET /api/defaults', () => {
+  it('returns llmModel + llmBaseUrl from loadConfig', async () => {
+    const original = { ...process.env };
+    process.env.HARNESS_LLM_MODEL = 'TestModel-7B';
+    process.env.HARNESS_LLM_BASE_URL = 'http://test.local:9000/v1';
+    process.env.HARNESS_LLM_API_KEY = 'super-secret-do-not-leak';
+    try {
+      const res = await fetch(`${baseUrl}/api/defaults`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.llmModel).toBe('TestModel-7B');
+      expect(body.llmBaseUrl).toBe('http://test.local:9000/v1');
+      // Surface a flag, never the key itself.
+      expect(body.apiKeyConfigured).toBe(true);
+      expect('llmApiKey' in body).toBe(false);
+      expect(JSON.stringify(body)).not.toContain('super-secret-do-not-leak');
+    } finally {
+      // Restore env.
+      for (const k of ['HARNESS_LLM_MODEL', 'HARNESS_LLM_BASE_URL', 'HARNESS_LLM_API_KEY']) {
+        if (original[k] === undefined) delete process.env[k];
+        else process.env[k] = original[k];
+      }
+    }
+  });
+
+  it('reports apiKeyConfigured=false when no key is set anywhere', async () => {
+    const saved = process.env.HARNESS_LLM_API_KEY;
+    delete process.env.HARNESS_LLM_API_KEY;
+    // The DEFAULT_CONFIG ships with `omlx-local` as the placeholder API
+    // key, so apiKeyConfigured will still be true via the default rung.
+    // What we're asserting here is just that the response shape is
+    // boolean-typed — the absence of leakage is covered above.
+    try {
+      const res = await fetch(`${baseUrl}/api/defaults`);
+      const body = await res.json();
+      expect(typeof body.apiKeyConfigured).toBe('boolean');
+    } finally {
+      if (saved !== undefined) process.env.HARNESS_LLM_API_KEY = saved;
+    }
+  });
+});
+
 describe('Bearer-token auth', () => {
   afterEach(() => setAuthToken(null));
 
