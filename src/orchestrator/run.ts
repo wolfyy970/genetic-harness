@@ -16,16 +16,39 @@
  */
 
 import { logger } from '../shared/logger.js';
-import type { HarnessConfig, ArchivedBot } from '../shared/types.js';
+import type {
+  HarnessConfig,
+  ArchivedBot,
+  FitnessResult,
+  MutationContext,
+} from '../shared/types.js';
 import { loadConfig } from '../shared/config.js';
 import { Population } from './population.js';
-import { generateMutation } from './mutation.js';
-import { evaluate, buildFitness } from './evaluator.js';
+import { generateMutationWithRetry } from './mutation.js';
+import { evaluate, compileReferenceRoster } from './evaluator.js';
+import { IsolatePool, type CompiledBot } from '../runtime/isolate.js';
 import { HeartbeatMonitor } from './heartbeat.js';
 import { getArena } from '../arena/interface.js';
 import '../arena/asteroids.js';
-import { createWorld } from '../engine/world.js';
-import { bundle } from '../runtime/bundler.js';
+
+/** Zero-fitness placeholder used while a seed bot is awaiting evaluation. */
+function zeroFitness(shipId: string): FitnessResult {
+  return {
+    shipId,
+    winRate: 0,
+    avgScore: 0,
+    avgFuelPerTick: 0,
+    avgTicksAlive: 0,
+    totalMatches: 0,
+    totalTicksAlive: 0,
+    cpuTimeTotal: 0n,
+    memoryUsed: 0,
+    crashes: 0,
+    fitnessScore: 0,
+    aggression: 0,
+    economy: 0,
+  };
+}
 
 /**
  * Generate a simple seed bot that does basic avoidance behavior.
@@ -86,7 +109,7 @@ function tick(botState) {
   return { type: 'wait' };
 }`,
     shipId: id,
-    fitness: buildFitness(id, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    fitness: zeroFitness(id),
     stage: 0,
     timestamp: Date.now(),
     metadata: {
@@ -99,32 +122,45 @@ function tick(botState) {
   };
 }
 
+/** Summary returned by runEvolution. */
+export interface EvolutionSummary {
+  generations: number;
+  archiveSize: number;
+  leaderboard: ArchivedBot[];
+  totalMutations: number;
+  acceptedMutations: number;
+}
+
 /**
  * Run the evolutionary loop for the genetic harness.
  *
- * Orchestrates the full generational cycle:
- *   1. Load configuration (merge defaults with overrides)
- *   2. Initialize MAP-Elites population (one seed bot per island)
- *   3. For each generation:
- *      a. Extract elites from each island
- *      b. Generate LLM-driven mutations
- *      c. Evaluate mutations through the cascade
- *      d. Add successful mutations to the population
- *      e. Run island migration
- *   4. Output leaderboard and archive on completion
+ * Steps each generation:
+ *   1. extract elites per island
+ *   2. mutate via LLM (or mock)
+ *   3. evaluate through the multi-stage cascade
+ *   4. add accepted candidates to the population
+ *   5. migrate between islands
  *
- * This is the CLI entry point — call `runEvolution()` directly or
- * invoke via `node run.ts <JSON_CONFIG>`.
+ * Returns an EvolutionSummary. Does *not* call process.exit; callers
+ * (CLI wrapper or tests) decide whether to terminate.
  *
- * @param overrides - Partial config to merge with defaults
+ * Stops early after `maxGenerations` (default 50) — pass via overrides.
  */
-export async function runEvolution(overrides: Partial<HarnessConfig> = {}): Promise<void> {
+export async function runEvolution(
+  overrides: Partial<HarnessConfig> & { maxGenerations?: number } = {},
+): Promise<EvolutionSummary> {
   const config = loadConfig(overrides);
   const arena = getArena(config.arena);
 
   if (!arena) {
-    logger.error({ arena: config.arena }, 'Arena not found — cannot start evolution');
-    return;
+    logger.error({ arena: config.arena }, 'Arena not found — aborting evolution');
+    return {
+      generations: 0,
+      archiveSize: 0,
+      leaderboard: [],
+      totalMutations: 0,
+      acceptedMutations: 0,
+    };
   }
 
   logger.info({ populationSize: config.populationSize, islandCount: config.islandCount }, 'Starting evolution');
@@ -138,15 +174,49 @@ export async function runEvolution(overrides: Partial<HarnessConfig> = {}): Prom
   const monitor = new HeartbeatMonitor(config.maxIdleMs, config.evalTimeoutMs);
   const monitorTimer = monitor.start(5000);
 
-  // Seed each island with one basic bot
+  // Single shared isolate pool + pre-compiled reference roster for the
+  // entire run. Evaluator compiles the candidate, runs matches against the
+  // roster, then disposes only the candidate. This avoids ~25-50ms of
+  // wasted reference-roster recompilation per evaluation.
+  const pool = new IsolatePool();
+  let referenceRoster: Map<string, CompiledBot>;
+  try {
+    referenceRoster = compileReferenceRoster(pool);
+  } catch (err) {
+    logger.error({ err }, 'Failed to compile reference roster — aborting evolution');
+    clearInterval(monitorTimer);
+    monitor.clear();
+    pool.cleanup();
+    return {
+      generations: 0,
+      archiveSize: 0,
+      leaderboard: [],
+      totalMutations: 0,
+      acceptedMutations: 0,
+    };
+  }
+
+  const evalOpts = { pool, referenceRoster, ownPool: false };
+
+  // Seed each island with one basic bot, evaluated up front so MAP-Elites
+  // placement is meaningful from generation 0.
   const seedCount = config.islandCount;
   for (let i = 0; i < seedCount; i++) {
     const seedBot = makeSeedBot(`seed-${i}`, i, 0);
+    try {
+      const result = await evaluate(seedBot, config.arena, config, evalOpts);
+      if (!result.error) {
+        seedBot.fitness = result.fitness;
+        seedBot.stage = result.stage;
+      }
+    } catch (err) {
+      logger.warn({ err, seed: seedBot.id }, 'Seed bot evaluation failed');
+    }
     population.addCandidate(seedBot);
-    logger.info({ seedBot: seedBot.shipId }, 'Seeded island');
+    logger.info({ seed: seedBot.shipId, fitness: seedBot.fitness.fitnessScore }, 'Seeded island');
   }
 
-  const maxGenerations = (overrides as any).maxGenerations ?? 50;
+  const maxGenerations = overrides.maxGenerations ?? 50;
   let generation = 0;
   let totalMutations = 0;
   let acceptedMutations = 0;
@@ -172,7 +242,7 @@ export async function runEvolution(overrides: Partial<HarnessConfig> = {}): Prom
       monitor.tick(id, 'generating mutation');
 
       try {
-        const context: any = {
+        const context: MutationContext = {
           bestK: population.getTopK(2),
           evaluationHistory: '',
           rewardReflection: {
@@ -181,14 +251,18 @@ export async function runEvolution(overrides: Partial<HarnessConfig> = {}): Prom
             avgFuelPerTick: bot.fitness.avgFuelPerTick,
             avgTicksAlive: bot.fitness.avgTicksAlive,
             fuelBreakdownBySource: [],
-            topBehavioralAxes: { aggression: 0, economic: 0, defensive: 0 },
+            topBehavioralAxes: {
+              aggression: bot.fitness.aggression ?? 0,
+              economic: bot.fitness.economy ?? 0,
+              defensive: 0,
+            },
           },
           mode: config.mode,
           fuelBudget: config.fuelCeiling,
           λ: config.λ ?? 0,
         };
 
-        const mutation = await generateMutation(bot.source, context, config);
+        const mutation = await generateMutationWithRetry(bot.source, context, config, 2);
         totalMutations++;
 
         monitor.tick(id, `mutated: ${mutation.reason}`);
@@ -224,7 +298,7 @@ export async function runEvolution(overrides: Partial<HarnessConfig> = {}): Prom
     const evalPromises = newBots.map(async (bot) => {
       monitor.tick(bot.id, 'evaluating');
       try {
-        const result = await evaluate(bot, config.arena, config, 0);
+        const result = await evaluate(bot, config.arena, config, evalOpts);
         monitor.tick(bot.id, `evaluated stage ${result.stage}`);
 
         // Add to population with updated fitness
@@ -290,12 +364,46 @@ export async function runEvolution(overrides: Partial<HarnessConfig> = {}): Prom
 
   clearInterval(monitorTimer);
   monitor.clear();
-  console.log('\nEvolution complete. Exiting.');
-  process.exit(0);
+  pool.cleanup();
+
+  return {
+    generations: generation,
+    archiveSize: archive.length,
+    leaderboard,
+    totalMutations,
+    acceptedMutations,
+  };
 }
 
-// CLI entry point
-runEvolution((process.argv[2] ? JSON.parse(process.argv[2]) : {})).catch((err) => {
-  logger.error({ err }, 'Fatal error during evolution');
-  process.exit(1);
-});
+/**
+ * CLI entry: invoked when this module is the program's main script.
+ * Detects via Node's `import.meta.url` so importers don't trigger it.
+ */
+const isMainModule =
+  typeof process !== 'undefined' &&
+  process.argv[1] &&
+  import.meta.url === `file://${process.argv[1]}`;
+
+if (isMainModule) {
+  const overrides = process.argv[2] ? JSON.parse(process.argv[2]) : {};
+  runEvolution(overrides)
+    .then((summary) => {
+      console.log(
+        `\nEvolution complete: ${summary.generations} generations, ` +
+          `${summary.archiveSize} archived, ${summary.acceptedMutations}/${summary.totalMutations} accepted.`,
+      );
+      if (summary.leaderboard[0]) {
+        const best = summary.leaderboard[0];
+        console.log(
+          `Top: ${best.id} winRate=${(best.fitness.winRate * 100).toFixed(1)}% ` +
+            `score=${best.fitness.fitnessScore.toFixed(3)} ` +
+            `fuel=${best.fitness.avgFuelPerTick.toFixed(0)}ns/tick`,
+        );
+      }
+      process.exit(0);
+    })
+    .catch((err) => {
+      logger.error({ err }, 'Fatal error during evolution');
+      process.exit(1);
+    });
+}

@@ -10,43 +10,45 @@
 import { buildSync } from 'esbuild';
 
 /**
- * Compile bot TypeScript source into a bundled IIFE string.
- * Wraps the bot source so the `tick` function is accessible on `globalThis`.
+ * Sentinel prefix returned in place of bundled JS when esbuild fails.
+ * Callers should test `result.startsWith(BUNDLE_ERROR_PREFIX)`.
+ */
+export const BUNDLE_ERROR_PREFIX = '// Compilation error:';
+
+/**
+ * Compile bot TypeScript source into an IIFE that exposes `tick` on globalThis.
+ *
+ * The bot source defines `function tick(botState) { ... }` at the top level.
+ * We append an explicit assignment so `tick` is reachable from outside the
+ * IIFE scope (esbuild keeps top-level function declarations IIFE-local
+ * otherwise, even with `globalName`).
  *
  * @param source - Raw TypeScript source code of the bot
- * @returns Bundled IIFE string with `tick` exposed on globalThis
+ * @returns Bundled JS string, or a string starting with BUNDLE_ERROR_PREFIX on failure
  */
 export function bundle(source: string): string {
   try {
+    const wrapped = `${source}\nif (typeof tick === 'function') { globalThis.tick = tick; }\n`;
     const result = buildSync({
       stdin: {
-        contents: source,
+        contents: wrapped,
         loader: 'ts' as const,
       },
       format: 'iife',
       target: 'es2020',
       bundle: true,
       minify: false,
-      globalName: '__gb',
       write: false,
       logLevel: 'silent',
     });
 
     if (result.outputFiles.length === 0) {
-      return '// Bundling produced no output';
+      return `${BUNDLE_ERROR_PREFIX} bundling produced no output`;
     }
 
-    const bundled = result.outputFiles[0].text;
-
-    // Wrap to expose tick on globalThis for the isolate context
-    return `(function() {
-      ${bundled}
-      if (typeof __gb !== 'undefined') {
-        globalThis.tick = __gb.tick || __gb;
-      }
-    })();`;
+    return result.outputFiles[0].text;
   } catch (err) {
     const msg = (err as Error).message || String(err);
-    return `// Compilation error: ${msg}`;
+    return `${BUNDLE_ERROR_PREFIX} ${msg}`;
   }
 }

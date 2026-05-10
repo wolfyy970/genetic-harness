@@ -1,258 +1,209 @@
 /**
  * @module isolate
- */
-
-/**
- * isolated-vm pool management.
  *
- * Manages a pool of V8 isolates for safe bot execution. Each isolate
- * gets its own heap (64MB memory limit) and runs the bot's tick function
- * with CPU budget enforcement.
+ * V8 isolate pool for executing bot tick functions.
+ *
+ * Each bot lives in its own ivm.Isolate (separate heap, separate GC). The
+ * bot bundle is compiled and run *inside that isolate's context once*, so
+ * `globalThis.tick` is captured as an `ivm.Reference`. Per-tick execution
+ * uses `applySync` with a CPU-time-budget timeout, which is the path
+ * isolated-vm guarantees as monotonically deterministic at the V8 level.
+ *
+ * CPU time accounting: `isolate.cpuTime` is bigint nanoseconds of thread
+ * time spent inside the isolate. Sampling before/after each `applySync`
+ * yields a per-tick "fuel" measurement — a strong proxy for compute even
+ * before we move to Wasmtime's deterministic fuel counter.
  */
 
-import * as ivm from 'isolated-vm';
+import ivm from 'isolated-vm';
 import { logger } from '../shared/logger.js';
 import type { BotAction, BotState } from '../shared/types.js';
-import {
-  setupDeterministicContext,
-  updateDeterministicTime,
-} from './deterministic.js';
+import { deterministicSetupCode, advanceTimeCode } from './deterministic.js';
+
+/** Default per-isolate heap cap (MB). 64 MB matches the design doc. */
+const DEFAULT_MEMORY_LIMIT_MB = 64;
+
+/** Default tick duration in milliseconds for time virtualization. */
+const DEFAULT_TICK_MS = 50;
 
 /**
- * A compiled bot ready to run inside an isolated-vm isolate.
+ * A bot compiled into a live isolate, ready to execute ticks.
  *
- * Holds the V8 isolate, a compiled script, an execution context,
- * and a CPU time metric for tracking resource usage.
+ * Holds direct references to the isolate, its context, and the captured
+ * `tick` function. Per-tick CPU cost is sampled by reading
+ * `isolate.cpuTime` before and after each `runTick` call.
  */
 export interface CompiledBot {
-  /** Compiled JavaScript ready to execute */
-  script: ivm.Script;
-  /** Execution context with deterministic globals set up */
-  context: ivm.Context;
-  /** The V8 isolate with 64MB memory limit */
   isolate: ivm.Isolate;
-  /** CPU time metric from the isolate (bigint, nanoseconds) */
-  cpuTimeMetric: bigint;
+  context: ivm.Context;
+  tickRef: ivm.Reference;
+}
+
+/** Result of a single per-tick execution. */
+export interface TickResult {
+  /** Action returned by the bot, or null if the bot crashed or timed out. */
+  action: BotAction | null;
+  /** Nanoseconds of cpuTime consumed by this tick alone. */
+  cpuNanos: bigint;
+  /** Set if the tick crashed or timed out. */
+  error?: string;
 }
 
 /**
- * Manages isolated V8 instances for bot execution.
- *
- * Each bot is compiled into a separate isolate with its own heap.
- * The pool recycles isolates and handles crashes gracefully.
- *
- * Usage:
- * ```ts
- * const pool = new IsolatePool();
- * const compiled = pool.compile(source, bundled);
- * pool.setupContext(compiled, 50);
- * const action = await pool.runTick(compiled, botState, 100);
- * pool.destroy(compiled);
- * pool.cleanup();
- * ```
+ * A pool of compiled bots. Owns the lifecycle of each isolate it creates.
  */
 export class IsolatePool {
   private bots: CompiledBot[] = [];
 
   /**
-   * Create a new V8 isolate with a 64MB memory limit.
+   * Compile a bot from its bundled IIFE and prepare it for execution.
    *
-   * The isolate is added to the pool's internal bot array and returned
-   * as a CompiledBot with a null script (placeholder). Call `compile()`
-   * to bind a script to it.
+   * 1. Create a fresh isolate with a memory cap.
+   * 2. Create one context inside it.
+   * 3. Eval the deterministic-globals snippet *first* (so the bot sees a
+   *    stripped environment).
+   * 4. Compile and run the bot bundle *in the same context* — this is what
+   *    actually defines `globalThis.tick`.
+   * 5. Capture `tick` as an `ivm.Reference` for synchronous re-invocation.
    *
-   * @returns A CompiledBot with a placeholder script and configured isolate
+   * Throws if the bundle fails to compile or run, or if it doesn't define
+   * a callable `globalThis.tick`. The isolate is disposed on failure.
    */
-  createIsolate(): CompiledBot {
-    const isolate = new ivm.Isolate({ memoryLimit: 64 });
-    const context = isolate.createContextSync();
-    const bot: CompiledBot = {
-      script: null as unknown as ivm.Script,
-      context,
-      isolate,
-      cpuTimeMetric: isolate.cpuTime,
-    };
-    this.bots.push(bot);
-    logger.info({ isolateId: this.bots.length }, 'Created new isolate');
-    return bot;
-  }
+  compileBot(
+    bundle: string,
+    opts: { memoryLimitMb?: number; tickMs?: number; seed?: number } = {},
+  ): CompiledBot {
+    const memoryLimit = opts.memoryLimitMb ?? DEFAULT_MEMORY_LIMIT_MB;
+    const tickMs = opts.tickMs ?? DEFAULT_TICK_MS;
+    const seed = opts.seed ?? 0;
 
-  /**
-   * Compile a bot source into an isolate.
-   *
-   * Creates a new isolate, compiles the bundled IIFE into it, and
-   * replaces the placeholder CompiledBot in the pool with a fully
-   * compiled one.
-   *
-   * @param source - Original TypeScript source (for logging / error reporting)
-   * @param bundle - Already-bundled IIFE string to compile into the isolate
-   * @returns CompiledBot with script bound to the isolate
-   * @throws If compilation fails, the isolate is cleaned up and the error re-thrown
-   */
-  compile(source: string, bundle: string): CompiledBot {
-    const bot = this.createIsolate();
+    const isolate = new ivm.Isolate({ memoryLimit });
+    let context: ivm.Context | null = null;
     try {
-      const script = bot.isolate.compileScriptSync(bundle);
-      const compiled: CompiledBot = {
-        ...bot,
-        script,
-        cpuTimeMetric: bot.isolate.cpuTime,
-      };
-      // Replace the placeholder in the pool
-      const idx = this.bots.indexOf(bot);
-      if (idx !== -1) this.bots[idx] = compiled;
-      logger.info(
-        { sourceLength: source.length, bundleLength: bundle.length },
-        'Compiled bot',
-      );
+      context = isolate.createContextSync();
+
+      // Install deterministic globals first.
+      context.evalSync(deterministicSetupCode(seed, tickMs));
+
+      // Compile and execute the bot bundle in the same context.
+      const script = isolate.compileScriptSync(bundle);
+      script.runSync(context, { timeout: 5000 });
+      script.release();
+
+      // Capture tick as a Reference for synchronous reuse.
+      const tickRef = context.global.getSync('tick', { reference: true }) as
+        | ivm.Reference
+        | undefined;
+
+      if (!tickRef || tickRef.typeof !== 'function') {
+        throw new Error('Bot did not define a callable globalThis.tick');
+      }
+
+      const compiled: CompiledBot = { isolate, context, tickRef };
+      this.bots.push(compiled);
       return compiled;
     } catch (err) {
-      logger.error({ error: err }, 'Failed to compile bot');
-      // Clean up the failed isolate
-      this.destroy(bot);
+      try {
+        context?.release();
+      } catch {
+        /* ignore */
+      }
+      try {
+        isolate.dispose();
+      } catch {
+        /* ignore */
+      }
       throw err;
     }
   }
 
   /**
-   * Set up deterministic context for a compiled bot.
+   * Execute one tick of the bot.
    *
-   * Initializes Math.random with a seeded PRNG, sets time to tick-driven,
-   * and strips unsafe APIs (timers, network, modules).
+   * Synchronous from the host's perspective; uses `applySync` with a CPU
+   * timeout. Returns the bot's action plus the nanoseconds of cpuTime
+   * consumed by this tick (delta against the isolate's cumulative counter).
    *
-   * @param bot - The compiled bot to configure
-   * @param tickMs - Target tick duration in milliseconds
+   * On timeout or crash, returns `{ action: null, error }` so the caller
+   * can downgrade the candidate's fitness without bringing down the pool.
    */
-  setupContext(bot: CompiledBot, tickMs: number): void {
-    try {
-      const ctx = setupDeterministicContext(bot.isolate, 0, tickMs);
-      // Swap in the new context
-      bot.context = ctx;
-      logger.debug('Set up deterministic context');
-    } catch (err) {
-      logger.error({ error: err }, 'Failed to set up deterministic context');
-    }
-  }
-
-  /**
-   * Run one tick of the bot's tick function.
-   *
-   * Updates time-based globals, injects BotState into the isolate,
-   * calls the bot's `tick(botState)` function with a CPU budget timeout,
-   * and returns the result.
-   *
-   * @param bot         - The compiled bot (holds isolate, script, context)
-   * @param botState    - The BotState to pass to the bot's tick function
-   * @param cpuBudget   - CPU budget in milliseconds
-   * @returns BotAction if the bot executed successfully, null on error/crash
-   */
-  async runTick(
+  runTick(
     bot: CompiledBot,
-    botState: BotState,
-    cpuBudget: number,
-  ): Promise<BotAction | null> {
-    const { context, isolate } = bot;
-
-    // Update time-based globals for this tick
-    updateDeterministicTime(context, botState.tick, 50); // tickMs default 50
-
-    // Inject bot state into the isolate context via ExternalCopy
-    const stateCopy = new ivm.ExternalCopy(botState);
-    await context.global.set('botState', stateCopy.copy());
-
+    state: BotState,
+    cpuBudgetMs: number,
+    tickNumber: number,
+    tickMs: number = DEFAULT_TICK_MS,
+  ): TickResult {
+    // Advance the bot's internal clock.
     try {
-      // Get the tick function reference from globalThis
-      const tickRef = await context.global.get('tick');
-      if (!(tickRef instanceof ivm.Reference)) {
-        logger.error('tick is not a valid reference in isolate context');
-        return null;
-      }
-
-      // Execute tick(botState) with CPU budget timeout (in microseconds)
-      const timeoutUs = cpuBudget * 1_000;
-      const resultRef = await tickRef.apply(undefined, [stateCopy.copy()], {
-        timeout: timeoutUs,
-      });
-
-      // Convert the result back from the isolate
-      const result = (resultRef as ivm.Reference).copySync() as BotAction;
-
-      // Update CPU time metric
-      bot.cpuTimeMetric = isolate.cpuTime;
-
-      return result;
+      bot.context.evalSync(advanceTimeCode(tickNumber, tickMs));
     } catch (err) {
-      logger.error(
-        { tick: botState.tick, error: err },
-        'Isolate tick failed — marking for recreation',
-      );
-      return null;
+      return {
+        action: null,
+        cpuNanos: 0n,
+        error: `time-update failed: ${(err as Error).message}`,
+      };
+    }
+
+    const before = bot.isolate.cpuTime;
+    try {
+      const result = bot.tickRef.applySync(undefined, [state], {
+        arguments: { copy: true },
+        result: { copy: true },
+        timeout: cpuBudgetMs,
+      });
+      const after = bot.isolate.cpuTime;
+      return {
+        action: (result as BotAction | null) ?? null,
+        cpuNanos: after - before,
+      };
+    } catch (err) {
+      const after = bot.isolate.cpuTime;
+      return {
+        action: null,
+        cpuNanos: after - before,
+        error: (err as Error).message,
+      };
     }
   }
 
-  /**
-   * Return the isolate's total CPU time used so far.
-   *
-   * @param bot - The compiled bot to query
-   * @returns CPU time in nanoseconds (bigint)
-   */
-  getCPUUsage(bot: CompiledBot): bigint {
+  /** Cumulative cpuTime in nanoseconds for this bot's isolate. */
+  cpuNanosTotal(bot: CompiledBot): bigint {
     return bot.isolate.cpuTime;
   }
 
-  /**
-   * Destroy a single isolate and remove it from the pool.
-   *
-   * Releases the script, context, and isolate resources. Errors during
-   * release (e.g., already released) are silently ignored.
-   *
-   * @param bot - The compiled bot to destroy
-   */
+  /** Dispose a single bot, releasing all V8 resources. */
   destroy(bot: CompiledBot): void {
     try {
-      bot.script.release();
+      bot.tickRef.release();
     } catch {
-      /* already released */
+      /* ignore */
     }
     try {
       bot.context.release();
     } catch {
-      /* already released */
+      /* ignore */
     }
     try {
       bot.isolate.dispose();
     } catch {
-      /* already disposed */
+      /* ignore */
     }
     const idx = this.bots.indexOf(bot);
     if (idx !== -1) this.bots.splice(idx, 1);
-    logger.debug('Destroyed isolate');
   }
 
-  /**
-   * Clean up all isolates in the pool.
-   *
-   * Iterates all bots in the pool, calls destroy() on each, and
-   * clears the internal bot array. Errors are silently ignored.
-   */
+  /** Dispose every bot in the pool. */
   cleanup(): void {
-    for (const bot of this.bots) {
-      try {
-        this.destroy(bot);
-      } catch {
-        /* ignore cleanup errors */
-      }
+    for (const bot of [...this.bots]) {
+      this.destroy(bot);
     }
     this.bots = [];
-    logger.info('Cleaned up all isolates');
+    logger.debug('IsolatePool: cleaned up');
   }
 
-  /**
-   * Number of isolates currently in the pool.
-   *
-   * @returns Count of active CompiledBot instances
-   */
-  getBotCount(): number {
+  /** Number of live bots in the pool. */
+  size(): number {
     return this.bots.length;
   }
 }

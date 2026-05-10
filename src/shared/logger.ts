@@ -1,11 +1,15 @@
 /**
- * Structured logger matching pino's (meta, message) calling convention.
- * Outputs human-readable log lines with optional JSON metadata.
+ * Structured logger.
+ *
+ * Calling convention: `logger.<level>(message)` for plain text, or
+ * `logger.<level>(meta, message)` to attach a metadata object that will be
+ * serialized as compact JSON. Errors and bigints are unpacked by a custom
+ * replacer so they don't render as `{}`.
  *
  * Usage:
  *   logger.info('simple message')
  *   logger.info({ shipId: 'ship-0' }, 'message with meta')
- *   logger.debug({ key: 'val' }, 'debug message')  // only shown when DEBUG=1
+ *   logger.debug({ key: 'val' }, 'debug message')  // only shown when DEBUG is set
  *
  * @module logger
  */
@@ -40,8 +44,17 @@ interface LogEntry {
  * @param entry - The log entry to format
  * @returns A formatted log line string
  */
+/** JSON.stringify replacer that unpacks Error objects (whose own props aren't enumerable). */
+function metaReplacer(_key: string, value: unknown): unknown {
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message, stack: value.stack };
+  }
+  if (typeof value === 'bigint') return value.toString();
+  return value;
+}
+
 function format(entry: LogEntry): string {
-  const meta = entry.meta ? ' ' + JSON.stringify(entry.meta) : '';
+  const meta = entry.meta ? ' ' + JSON.stringify(entry.meta, metaReplacer) : '';
   return `[${entry.timestamp}] ${entry.level.toUpperCase()} ${entry.message}${meta}`;
 }
 

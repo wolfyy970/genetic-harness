@@ -130,7 +130,11 @@ export function createWorld(config: GameConfig): GameState {
     { x: config.worldWidth * 0.75, y: config.worldHeight * 0.75 },
   ];
 
-  const shipCount = Math.min(4, config.worldWidth * config.worldHeight / 50000);
+  const derived = Math.floor((config.worldWidth * config.worldHeight) / 50000);
+  const shipCount = Math.max(
+    1,
+    Math.min(4, config.shipCount ?? derived),
+  );
   for (let i = 0; i < shipCount; i++) {
     const pos = shipPositions[i % shipPositions.length];
     const angle = rng.nextRangeInclusive(0, Math.PI * 2);

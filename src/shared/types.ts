@@ -130,6 +130,8 @@ export interface GameConfig {
   shipMaxFuel: number;
   asteroidBaseRadius: number;
   asteroidSpeed: number;
+  /** Override for derived ship count. If omitted, derived from world area. */
+  shipCount?: number;
 }
 
 /**
@@ -195,14 +197,18 @@ export interface FitnessResult {
   shipId: string;
   winRate: number;          // 0.0 - 1.0
   avgScore: number;
-  avgFuelPerTick: number;   // isolated-vm cpuTime nanoseconds
+  avgFuelPerTick: number;   // isolated-vm cpuTime nanoseconds (avg per tick)
   avgTicksAlive: number;
   totalMatches: number;
   totalTicksAlive: number;
-  cpuTimeTotal: bigint;     // isolated-vm cpuTime
+  cpuTimeTotal: bigint;     // isolated-vm cpuTime, summed across all ticks
   memoryUsed: number;       // isolate memory
   crashes: number;          // count of evaluation failures
-  fitnessScore: number;     // combined fitness for ranking
+  fitnessScore: number;     // ranking score chosen by harness mode
+  /** Mean fraction of valid ticks where the bot fired. [0,1]. */
+  aggression?: number;
+  /** Mean fraction of valid ticks where the bot thrust or waited. [0,1]. */
+  economy?: number;
 }
 
 /**

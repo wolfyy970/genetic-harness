@@ -1,94 +1,48 @@
 /**
  * @module deterministic
  *
- * Ensures bots run in a fully deterministic, sandboxed environment
- * inside an isolated-vm context.
+ * Emits a JS snippet that installs deterministic globals inside an
+ * isolated-vm context. We use a string snippet (not pre-compiled host code)
+ * so `_dtTime` and `_prngState` end up on the bot's global scope, where
+ * the host can mutate them per tick via a one-line `evalSync` without
+ * recompiling.
  *
- * - Math.random uses a seeded PRNG (Mulberry32) for reproducibility
- * - Date.now / performance.now are tick-driven (not wall-clock)
- * - Non-deterministic APIs (timers, network, modules) are stripped to no-ops
+ * Math.random algorithm matches `SeededRNG.next()` in `engine/utils.ts` —
+ * keep the two in sync.
  */
-
-import * as ivm from 'isolated-vm';
-
-/**
- * Sets up deterministic globals inside an isolated-vm context.
- *
- * Seeded from (tickNumber * 31337 + 12345) for determinism across ticks.
- * Strips Math.random, Date.now, performance.now, timers, network, modules.
- *
- * @param isolate  - The isolated-vm isolate to create a context for
- * @param tickNumber - Current game tick number (used for seeding and time)
- * @param tickMs   - Target tick duration in milliseconds
- * @returns A new isolated-vm Context with all deterministic globals configured
- */
-export function setupDeterministicContext(
-  isolate: ivm.Isolate,
-  tickNumber: number,
-  tickMs: number,
-): ivm.Context {
-  const ctx = isolate.createContextSync();
-
-  // Seed derived from tick number and tickMs for determinism across ticks
-  const seed = tickNumber * 31337 + 12345;
-  const currentTime = tickNumber * tickMs;
-
-  ctx.evalSync(`
-    (function() {
-      // Seeded PRNG (Mulberry32) for deterministic Math.random
-      var _prngState = ${seed};
-      Math.random = function() {
-        _prngState |= 0;
-        _prngState = (_prngState + 0x6D2B79F5) | 0;
-        var t = Math.imul(_prngState ^ (_prngState >>> 15), 1 | _prngState);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-      };
-
-      // Tick-driven time (not wall-clock)
-      var _dtTime = ${currentTime};
-      Date.now = function() { return _dtTime; };
+export function deterministicSetupCode(seed: number, tickMs: number): string {
+  return `
+    var _prngState = ${seed | 0};
+    var _dtTime = 0;
+    Math.random = function() {
+      _prngState = (_prngState + 0x6D2B79F5) | 0;
+      var t = Math.imul(_prngState ^ (_prngState >>> 15), 1 | _prngState);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    Date.now = function() { return _dtTime; };
+    if (typeof performance === 'undefined') {
+      globalThis.performance = { now: function() { return _dtTime; } };
+    } else {
       performance.now = function() { return _dtTime; };
-
-      // No-op for async timer APIs (bots must not use them)
-      var noop = function() {};
-      setTimeout = noop;
-      setInterval = noop;
-      clearTimeout = noop;
-      clearInterval = noop;
-
-      // No-op console (bots must not print)
-      console = { log: noop, warn: noop, error: noop };
-
-      // No network access
-      fetch = noop;
-      XMLHttpRequest = noop;
-
-      // No module loading
-      require = noop;
-
-      // No process / global access
-      process = undefined;
-      global = undefined;
-    })();
-  `);
-
-  return ctx;
+    }
+    var __noop = function() {};
+    globalThis.setTimeout = __noop;
+    globalThis.setInterval = __noop;
+    globalThis.clearTimeout = __noop;
+    globalThis.clearInterval = __noop;
+    globalThis.queueMicrotask = __noop;
+    globalThis.console = { log: __noop, warn: __noop, error: __noop, info: __noop, debug: __noop };
+    globalThis.fetch = __noop;
+    globalThis.XMLHttpRequest = __noop;
+    globalThis.require = __noop;
+    globalThis.process = undefined;
+    globalThis.global = undefined;
+    globalThis.__tickMs = ${tickMs};
+  `;
 }
 
-/**
- * Update time-based globals for a new tick.
- * Call this before each runTick to advance the game clock.
- *
- * @param ctx      - The isolated-vm context
- * @param tickNumber - Current tick number
- * @param tickMs   - Target tick duration in milliseconds
- */
-export function updateDeterministicTime(
-  ctx: ivm.Context,
-  tickNumber: number,
-  tickMs: number,
-): void {
-  const time = tickNumber * tickMs;
-  ctx.evalSync(`_dtTime = ${time};`);
+/** Build the JS snippet that advances `_dtTime` to a new tick. */
+export function advanceTimeCode(tickNumber: number, tickMs: number): string {
+  return `_dtTime = ${tickNumber * tickMs};`;
 }

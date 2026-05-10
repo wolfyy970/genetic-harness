@@ -18,6 +18,7 @@ import type {
   SearchReplaceBlock,
   HarnessConfig,
 } from '../shared/types.js';
+import { bundle, BUNDLE_ERROR_PREFIX } from '../runtime/bundler.js';
 
 /**
  * Build the mutation prompt for the LLM.
@@ -93,22 +94,98 @@ You may produce multiple SEARCH/REPLACE blocks if needed.`;
 }
 
 /**
- * Call the LLM to generate a mutation plan for a bot source.
+ * Mock mutator: deterministic source-level perturbations for offline runs.
  *
- * Sends a prompt to the configured LLM endpoint (via oMLX) asking it to
- * produce SEARCH/REPLACE blocks that improve the bot. The response is parsed
- * and applied to the source. Includes a 60-second timeout.
+ * Activated by `LLM_MOCK=1` env var or `config.llmBaseUrl === 'mock'`.
+ * Useful for:
+ *   - integration tests (no live LLM)
+ *   - smoke runs when the user's local oMLX server isn't up
+ *   - benchmarking the harness loop without LLM latency
  *
- * @param source      - Current bot source code
- * @param context     - Mutation context (best exemplars, reward reflection, mode)
- * @param config      - Harness config (includes LLM base URL, model, API key)
- * @returns A MutationPlan with the mutated source and metadata
+ * The mutations are intentionally trivial (numeric tweaks, conditional
+ * flips, comment additions) — they exercise the SEARCH/REPLACE pipeline
+ * without trying to be smart.
+ */
+function mockMutate(source: string): { source: string; reason: string; blocks: SearchReplaceBlock[] } {
+  const variants: Array<(s: string) => { newSource: string; reason: string; old?: string; nw?: string }> = [
+    (s) => {
+      const m = /< 200/.exec(s);
+      if (m) {
+        const idx = m.index;
+        const newSource = s.slice(0, idx) + '< 250' + s.slice(idx + m[0].length);
+        return { newSource, reason: 'extend engagement range from 200 to 250', old: '< 200', nw: '< 250' };
+      }
+      return { newSource: s, reason: 'no-op (no engagement-range pattern found)' };
+    },
+    (s) => {
+      // Insert an early-exit when fuel is low.
+      const m = /function tick\([^)]*\)\s*\{/.exec(s);
+      if (!m) return { newSource: s, reason: 'no-op (no tick function found)' };
+      const idx = m.index + m[0].length;
+      const guard = `\n  if (s.ship && s.ship.fuel < 100) return { type: 'wait' };`;
+      if (s.includes('s.ship.fuel < 100')) {
+        return { newSource: s, reason: 'no-op (fuel guard already present)' };
+      }
+      const newSource = s.slice(0, idx) + guard + s.slice(idx);
+      return { newSource, reason: 'add low-fuel-wait guard', old: m[0], nw: m[0] + guard };
+    },
+    (s) => {
+      const m = /direction:\s*1/.exec(s);
+      if (m) {
+        const idx = m.index;
+        const newSource = s.slice(0, idx) + 'direction: -1' + s.slice(idx + m[0].length);
+        return { newSource, reason: 'flip rotation direction', old: 'direction: 1', nw: 'direction: -1' };
+      }
+      return { newSource: s, reason: 'no-op (no rotate-direction pattern found)' };
+    },
+  ];
+
+  // Pseudo-random variant choice driven by source hash for determinism.
+  let h = 0;
+  for (let i = 0; i < source.length; i++) h = ((h << 5) - h + source.charCodeAt(i)) | 0;
+  const variant = variants[Math.abs(h) % variants.length];
+  const r = variant(source);
+
+  const blocks: SearchReplaceBlock[] =
+    r.old && r.nw
+      ? [{ startLine: 0, endLine: 0, oldText: r.old, newText: r.nw }]
+      : [];
+  return { source: r.newSource, reason: `[mock] ${r.reason}`, blocks };
+}
+
+/** True when the harness should bypass live LLM and use the mock mutator. */
+function isMockMode(config: HarnessConfig): boolean {
+  if (process.env.LLM_MOCK === '1') return true;
+  if (config.llmBaseUrl === 'mock') return true;
+  return false;
+}
+
+/**
+ * Call the LLM (or mock mutator) to generate a mutation plan for a bot.
+ *
+ * In live mode, sends the prompt to the configured chat-completions
+ * endpoint and parses SEARCH/REPLACE blocks from the response.
+ * In mock mode (LLM_MOCK=1 or llmBaseUrl='mock'), produces a deterministic
+ * source-level perturbation without any network call.
+ *
+ * Live calls have a 60-second hard timeout via AbortController.
  */
 export async function generateMutation(
   source: string,
   context: MutationContext,
   config: HarnessConfig,
 ): Promise<MutationPlan> {
+  if (isMockMode(config)) {
+    const m = mockMutate(source);
+    return {
+      shipId: '',
+      source: m.source,
+      isImprovement: m.blocks.length > 0,
+      reason: m.reason,
+      searchReplaceDiff: m.blocks,
+    };
+  }
+
   const promptText = buildMutationPrompt(context);
   // promptText is now an object { system, user } — unwrap it
   const promptObj = typeof promptText === 'string' ? { system: '', user: promptText } : promptText;
@@ -173,6 +250,59 @@ export async function generateMutation(
     };
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Generate a mutation, then verify it compiles. On bundle failure, feed
+ * the compile error back into the mutation context as a failure trace and
+ * retry, up to `maxRetries` times.
+ *
+ * This is the "Self-Debugging" pattern from the literature: cheap retry
+ * loops with grounded compile-error feedback materially improve LLM-coding
+ * quality at low cost. With mock-LLM mode the mock is deterministic and
+ * compiles on the first try, so this is essentially a pass-through during
+ * tests; the wrapper earns its keep with live LLMs.
+ */
+export async function generateMutationWithRetry(
+  source: string,
+  context: MutationContext,
+  config: HarnessConfig,
+  maxRetries: number = 2,
+): Promise<MutationPlan> {
+  let attempt = 0;
+  let history = context.evaluationHistory ?? '';
+
+  while (true) {
+    const ctxAttempt: MutationContext = {
+      ...context,
+      evaluationHistory: history,
+    };
+    const plan = await generateMutation(source, ctxAttempt, config);
+    const bundled = bundle(plan.source);
+
+    if (!bundled.startsWith(BUNDLE_ERROR_PREFIX)) {
+      return plan;
+    }
+
+    if (attempt >= maxRetries) {
+      logger.warn(
+        { attempt, error: bundled.slice(0, 200) },
+        'Mutation failed to compile after retries — returning original source',
+      );
+      // Return the original (compilable) source as a no-op mutation so the
+      // candidate isn't lost from the population.
+      return {
+        shipId: plan.shipId,
+        source,
+        isImprovement: false,
+        reason: `compile failed after ${maxRetries} retries: ${bundled.slice(0, 100)}`,
+        searchReplaceDiff: [],
+      };
+    }
+
+    history = `${history}\n[attempt ${attempt + 1} compile error] ${bundled}`;
+    attempt += 1;
   }
 }
 
@@ -246,21 +376,16 @@ function applyBlock(source: string, block: SearchReplaceBlock): string {
     return before + '\n' + block.newText + (after.startsWith('\n') ? '' : '\n') + after;
   }
 
-  // Fallback: try line-by-line matching
-  let found = false;
-  for (let i = 0; i <= lines.length - block.oldText.split('\n').length; i++) {
-    const chunk = lines.slice(i, i + block.oldText.split('\n').length).join('\n');
+  const oldLineCount = block.oldText.split('\n').length;
+  for (let i = 0; i <= lines.length - oldLineCount; i++) {
+    const chunk = lines.slice(i, i + oldLineCount).join('\n');
     if (chunk === block.oldText) {
       const before = lines.slice(0, i).join('\n');
-      const after = lines.slice(i + block.oldText.split('\n').length).join('\n');
-      found = true;
+      const after = lines.slice(i + oldLineCount).join('\n');
       return before + '\n' + block.newText + (after.startsWith('\n') ? '' : '\n') + after;
     }
   }
 
-  if (!found) {
-    logger.warn({ block }, 'SEARCH/REPLACE block did not match — skipping');
-  }
-
+  logger.warn({ block }, 'SEARCH/REPLACE block did not match — skipping');
   return source;
 }

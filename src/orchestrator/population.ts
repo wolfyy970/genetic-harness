@@ -11,6 +11,7 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { clamp } from '../engine/utils.js';
 import type {
   ArchivedBot,
   FitnessResult,
@@ -35,7 +36,6 @@ interface EliteCell {
 class Island {
   readonly islandId: number;
   readonly grid: Map<string, EliteCell> = new Map();
-  readonly candidates: ArchivedBot[] = [];
 
   constructor(islandId: number) {
     this.islandId = islandId;
@@ -44,19 +44,22 @@ class Island {
   /**
    * Compute the grid cell key for a bot based on its fitness.
    *
-   * Strategy bucket: floor(winRate * 4), clamped to [0, 3].
-   * Fuel bucket: floor(log2(avgFuelPerTick + 1) / 2), clamped to [0, 7].
+   * The MAP-Elites grid is keyed on (strategic_style, fuel_per_tick_bucket)
+   * per the revised design doc — quality (winRate) is *not* an axis, it's
+   * the score elites compete on inside each cell.
    *
-   * @param fitness - Fitness result of the bot
-   * @returns A string key like "2-4" representing the grid cell
+   * Aggression bucket: floor(aggression * 4), clamped to [0, 3].
+   *   - 0: zero-fire (defensive/positional)
+   *   - 1: occasional fire
+   *   - 2: aggressive
+   *   - 3: spam-fire
+   * Fuel bucket: log2(ns/tick) into 8 buckets ~ 1µs..1ms range.
    */
   cellKey(fitness: FitnessResult): string {
-    // Bucket strategic style (win rate) into 4 tiers
-    const strategyBucket = Math.min(3, Math.floor(fitness.winRate * 4));
-    // Bucket fuel efficiency into logarithmic buckets
+    const aggressionBucket = clamp(Math.floor((fitness.aggression ?? 0) * 4), 0, 3);
     const fuel = fitness.avgFuelPerTick;
-    const fuelBucket = fuel <= 0 ? 0 : Math.min(7, Math.floor(Math.log2(fuel + 1) / 2));
-    return `${strategyBucket}-${fuelBucket}`;
+    const fuelBucket = fuel <= 0 ? 0 : clamp(Math.floor(Math.log2(fuel + 1) / 2), 0, 7);
+    return `${aggressionBucket}-${fuelBucket}`;
   }
 
   /**
@@ -74,7 +77,6 @@ class Island {
     }
 
     this.grid.set(key, { bot });
-    this.candidates.push(bot);
     return true;
   }
 

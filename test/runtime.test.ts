@@ -33,15 +33,17 @@ describe('Bundler', () => {
     expect(bundled).toContain('Compilation error');
   });
 
-  it('produces IIFE-wrapped output', () => {
+  it('produces IIFE-wrapped output that assigns tick to globalThis', () => {
     const source = `
       export function tick(botState: any): any {
         return { type: 'fire' };
       }
     `;
     const bundled = bundle(source);
-    expect(bundled).toContain('(function()');
+    // esbuild's iife format uses arrow-function wrappers in modern targets
+    expect(bundled).toMatch(/^\(\s*(?:\(\)\s*=>|function\s*\()/);
     expect(bundled).toContain('})();');
+    expect(bundled).toContain('globalThis.tick = tick');
   });
 
   it('includes the tick function in output', () => {

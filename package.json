@@ -4,24 +4,21 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "vitest",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "run": "tsx src/orchestrator/run.ts",
+    "smoke": "tsx src/orchestrator/run.ts '{\"llmBaseUrl\":\"mock\",\"islandCount\":2,\"maxGenerations\":3,\"stages\":{\"syntax\":true,\"quickRollout\":{\"enabled\":true,\"steps\":50},\"quickGames\":{\"enabled\":true,\"games\":1},\"fullTournament\":{\"enabled\":false,\"games\":0}},\"maxIdleMs\":60000,\"evalTimeoutMs\":60000,\"leaderboardSize\":5}'",
     "serve": "tsx src/server.ts"
   },
   "dependencies": {
     "isolated-vm": "^5.0.4",
-    "esbuild": "^0.25.0",
-    "seedrandom": "^3.0.5",
-    "pino": "^9.6.0",
-    "zod": "^3.24.0",
-    "glob": "^11.0.1",
-    "globrex": "^0.1.2"
+    "esbuild": "^0.25.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
     "tsx": "^4.19.0",
     "vitest": "^3.0.0",
-    "@types/seedrandom": "^3.0.8",
     "@types/node": "^22.0.0"
   }
 }
