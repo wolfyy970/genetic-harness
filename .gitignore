@@ -11,3 +11,8 @@ data/
 *_quick_test.ts
 *_llm_check.ts
 *_final_test.ts
+
+# Standard rules added for health
+.env.local
+build/
+*.log
