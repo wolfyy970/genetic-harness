@@ -25,9 +25,9 @@ const BASE: GameConfig = {
 };
 
 describe('createWorld ship count', () => {
-  it('caps derived ship count at 4 even on huge worlds', () => {
+  it('caps derived ship count at 16 even on huge worlds', () => {
     const w = createWorld({ ...BASE, worldWidth: 100_000, worldHeight: 100_000 });
-    expect(w.ships.length).toBeLessThanOrEqual(4);
+    expect(w.ships.length).toBeLessThanOrEqual(16);
   });
 
   it('honors an explicit shipCount override', () => {
@@ -35,13 +35,18 @@ describe('createWorld ship count', () => {
     expect(w.ships.length).toBe(2);
   });
 
+  it('honors an 8-ship override (the FFA topology)', () => {
+    const w = createWorld({ ...BASE, shipCount: 8 });
+    expect(w.ships.length).toBe(8);
+  });
+
   it('always produces at least one ship', () => {
     const w = createWorld({ ...BASE, worldWidth: 100, worldHeight: 100, shipCount: 0 });
     expect(w.ships.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('clamps shipCount override to at most 4', () => {
+  it('clamps shipCount override to at most 16', () => {
     const w = createWorld({ ...BASE, shipCount: 99 });
-    expect(w.ships.length).toBeLessThanOrEqual(4);
+    expect(w.ships.length).toBeLessThanOrEqual(16);
   });
 });

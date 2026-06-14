@@ -196,12 +196,19 @@ export function gridHeatmap(container, cells, { rows = 4, cols = 8, onClick } = 
         const t = Math.max(0, Math.min(1, cell.fitness / maxFitness));
         const lightness = 30 + 50 * t;
         div.style.background = `hsl(${190 + 20 * t}, 70%, ${lightness}%)`;
-        div.title = `agg=${r} fuel=${c} fit=${cell.fitness.toFixed(3)} ${cell.shipId} (gen ${cell.generation})`;
+        // Human-readable bucket labels: aggression 0..3 = none/light/medium/heavy fire;
+        // fuel 0..7 = log2 ns/tick bands. Tooltip carries best-fitness bot + gen.
+        const aggrLabel = ['quiet (0% fire)', 'light fire', 'medium fire', 'spam fire'][r] ?? `agg=${r}`;
+        const fuelLabel = `~${Math.round(Math.pow(2, c * 2) / 1000)}µs/tick`;
+        div.title =
+          `${aggrLabel} · ${fuelLabel}\n` +
+          `best: ${cell.shipId} (gen ${cell.generation}) · fitness ${cell.fitness.toFixed(3)}`;
         div.dataset.shipId = cell.shipId;
         div.dataset.generation = String(cell.generation);
         if (onClick) div.addEventListener('click', () => onClick(cell));
       } else {
         div.style.background = '#11172a';
+        div.title = 'empty cell — no bot in this aggression × fuel band';
       }
       container.appendChild(div);
     }

@@ -131,11 +131,20 @@ describe('Evolution loop (mock LLM)', () => {
     expect(existsSync(replayPath)).toBe(true);
 
     const replay = JSON.parse(readFileSync(replayPath, 'utf8'));
-    expect(replay.schema).toBe(2);
+    expect(replay.schema).toBe(4);
     expect(replay.arena).toBe('asteroids');
     expect(Array.isArray(replay.frames)).toBe(true);
     expect(replay.frames.length).toBeGreaterThan(0);
     expect(replay.frames.length).toBeLessThanOrEqual(50);
+
+    // Slice 2 verification: at least one asteroid frame carries the new
+    // tier + vertex shape introduced by the real-Asteroids overhaul.
+    const firstFrame = replay.frames[0];
+    const ast = firstFrame.entities.find((e: any) => e.type === 'asteroid');
+    expect(ast).toBeDefined();
+    expect(Array.isArray(ast.vertices)).toBe(true);
+    expect(ast.vertices.length).toBeGreaterThan(0);
+    expect(['LARGE', 'MEDIUM', 'SMALL']).toContain(ast.tier);
   }, 90_000);
 
   it('persists leaderboard.json to archiveDir after each generation', async () => {

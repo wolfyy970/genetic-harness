@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { detectCollisions } from '../src/engine/collision.js';
-import type { Asteroid, Bullet, GameState, ShipState } from '../src/shared/types.js';
+import type { Asteroid, AsteroidTier, Bullet, GameState, ShipState } from '../src/shared/types.js';
 
 const CONFIG = {
   worldWidth: 400,
@@ -45,7 +45,20 @@ function makeShip(id: string, x: number, y: number, opts: Partial<ShipState> = {
   };
 }
 
-function makeAsteroid(id: string, x: number, y: number, radius: number, health: number): Asteroid {
+const TIER_RADIUS: Record<AsteroidTier, number> = {
+  LARGE: 45,
+  MEDIUM: 25,
+  SMALL: 12,
+};
+
+function makeAsteroid(
+  id: string,
+  x: number,
+  y: number,
+  tier: AsteroidTier,
+  health: number,
+): Asteroid {
+  const radius = TIER_RADIUS[tier];
   return {
     id,
     type: 'asteroid',
@@ -54,6 +67,7 @@ function makeAsteroid(id: string, x: number, y: number, radius: number, health: 
     radius,
     health,
     mass: Math.PI * radius * radius * 0.01,
+    tier,
     vertices: [],     // shape doesn't matter for collision tests; bounding-radius hit-detect
     rotation: 0,
     angularVel: 0,
@@ -75,7 +89,8 @@ function makeBullet(id: string, owner: string, x: number, y: number, damage: num
 
 function baseState(ships: ShipState[]): GameState {
   return {
-    tick: 0,
+    // Past spawn-grace window so damage paths fire.
+    tick: 100,
     worldWidth: 400,
     worldHeight: 300,
     seed: 1,
@@ -90,47 +105,47 @@ describe('score credit — bullet vs asteroid', () => {
   it('credits +1 to the bullet owner on a non-lethal hit', () => {
     const shooter = makeShip('shooter', 100, 100);
     const state = baseState([shooter]);
-    // Asteroid with 100 health > bullet damage 25, so non-lethal.
-    state.asteroids.push(makeAsteroid('a1', 100, 100, 30, 100));
+    // Force health = 100 (override the tier default of 1) so the bullet's
+    // 25 damage is non-lethal.
+    state.asteroids.push(makeAsteroid('a1', 100, 100, 'LARGE', 100));
     state.bullets.push(makeBullet('b1', 'shooter', 100, 100, 25));
 
     detectCollisions(state);
     expect(state.ships[0].score).toBe(1);
   });
 
-  it('credits +1 hit + size-scaled kill credit when the asteroid dies', () => {
+  it('credits +1 hit + tier-scaled kill credit when a LARGE asteroid dies', () => {
     const shooter = makeShip('shooter', 100, 100);
     const state = baseState([shooter]);
-    // Health 25 == bullet damage; asteroid dies on this hit.
-    // Large radius (≥ 40) → kill score 20.
-    state.asteroids.push(makeAsteroid('a1', 100, 100, 50, 25));
+    // health 25 → bullet damage 25 → dies on this hit; LARGE = 20 points.
+    state.asteroids.push(makeAsteroid('a1', 100, 100, 'LARGE', 25));
     state.bullets.push(makeBullet('b1', 'shooter', 100, 100, 25));
 
     detectCollisions(state);
-    // 1 (hit) + 20 (large kill) = 21
-    expect(state.ships[0].score).toBe(21);
-  });
-
-  it('credits 50 for a medium-asteroid kill (20 ≤ r < 40)', () => {
-    const shooter = makeShip('shooter', 100, 100);
-    const state = baseState([shooter]);
-    state.asteroids.push(makeAsteroid('a1', 100, 100, 25, 25));
-    state.bullets.push(makeBullet('b1', 'shooter', 100, 100, 25));
-
-    detectCollisions(state);
-    // 1 + 50 = 51
+    // 1 (hit) + 50 (LARGE kill) = 51
     expect(state.ships[0].score).toBe(51);
   });
 
-  it('credits 100 for a small-asteroid kill (r < 20)', () => {
+  it('credits 50 for a MEDIUM-asteroid kill', () => {
     const shooter = makeShip('shooter', 100, 100);
     const state = baseState([shooter]);
-    state.asteroids.push(makeAsteroid('a1', 100, 100, 15, 25));
+    state.asteroids.push(makeAsteroid('a1', 100, 100, 'MEDIUM', 25));
     state.bullets.push(makeBullet('b1', 'shooter', 100, 100, 25));
 
     detectCollisions(state);
-    // 1 + 100 = 101
+    // 1 + 100 = 101 (MEDIUM kill)
     expect(state.ships[0].score).toBe(101);
+  });
+
+  it('credits 100 for a SMALL-asteroid kill', () => {
+    const shooter = makeShip('shooter', 100, 100);
+    const state = baseState([shooter]);
+    state.asteroids.push(makeAsteroid('a1', 100, 100, 'SMALL', 25));
+    state.bullets.push(makeBullet('b1', 'shooter', 100, 100, 25));
+
+    detectCollisions(state);
+    // 1 + 200 = 201 (SMALL kill — small targets worth the most)
+    expect(state.ships[0].score).toBe(201);
   });
 });
 
@@ -169,7 +184,7 @@ describe('score credit — bullet vs ship', () => {
   it('asteroid kill on a ship grants no shooter credit (no shooter)', () => {
     const victim = makeShip('victim', 100, 100, { health: 5 });
     const state = baseState([victim]);
-    state.asteroids.push(makeAsteroid('a1', 100, 100, 25, 100));
+    state.asteroids.push(makeAsteroid('a1', 100, 100, 'MEDIUM', 100));
 
     detectCollisions(state);
     // Victim's score should be untouched by the collision; whatever damage
@@ -182,11 +197,11 @@ describe('score credit — ignores missing/destroyed shooters', () => {
   it('does not throw when bullet.owner refers to a removed ship', () => {
     // Shooter is gone (e.g. destroyed last tick), but their bullet is still in flight.
     const state = baseState([]);
-    state.asteroids.push(makeAsteroid('a1', 100, 100, 30, 25));
+    state.asteroids.push(makeAsteroid('a1', 100, 100, 'LARGE', 25));
     state.bullets.push(makeBullet('b1', 'ghost', 100, 100, 25));
 
     expect(() => detectCollisions(state)).not.toThrow();
-    // Asteroid still dies, just no one gets credit.
-    expect(state.asteroids.length).toBeLessThanOrEqual(2); // maybe split fragments
+    // Parent LARGE killed → 2 MEDIUM fragments.
+    expect(state.asteroids.length).toBe(2);
   });
 });

@@ -3,20 +3,23 @@
  *
  * Multi-stage evaluation of a candidate bot.
  *
- * Cascade:
+ * Cascade (8-player free-for-all topology):
  *   stage 0  Compile gate                — esbuild bundle must succeed,
  *                                          isolate must boot with a callable
  *                                          globalThis.tick.
- *   stage 1  Smoke roll-out              — N short matches against the null
- *                                          opponent. Kills crashy / silent /
- *                                          runaway-CPU bots cheaply.
- *   stage 2  Reference-roster tournament — round-robin 1v1 against the
- *                                          frozen reference roster, multiple
- *                                          seeds per opponent.
+ *   stage 1  Smoke roll-out              — short 1v1 vs the null opponent;
+ *                                          kills crashy / silent / runaway-CPU
+ *                                          bots cheaply before paying for FFA.
+ *   stage 2  Reference-roster FFA        — N matches of {candidate + 7 non-Null
+ *                                          roster bots}; multiple seeds.
+ *   stage 3  Self-play FFA               — 1 match of {candidate + top-K elites
+ *                                          + roster fill} to break the fixed-
+ *                                          roster ceiling.
  *
- * Output is a FitnessResult with the ranking score selected by mode
- * (pure / pareto / capped / weighted) and a behavioral signature derived
- * from per-opponent win/loss/draw outcomes.
+ * N-way outcome rule: a match yields one W/L/D for the candidate.
+ *   W: candidate has strictly the highest score (or is sole survivor)
+ *   L: candidate score is below the median of all 8 ships
+ *   D: otherwise (mid-pack)
  */
 
 import { logger } from '../shared/logger.js';
@@ -40,24 +43,42 @@ import {
 } from './match.js';
 import { REFERENCE_ROSTER, type ScriptedBot } from './reference.js';
 
-const DEFAULT_MATCH_TICKS = 600;
+/**
+ * Per-match cap (in ticks). 2000 × 50ms tickMs = 100s of game time —
+ * enough for a full 8-ship FFA arc (initial encounter → mid-match attrition
+ * → asteroid-field cleanup → endgame chase). `playMatch` exits early as
+ * soon as `aliveCount <= 1`, so most matches end well below this cap. The
+ * cap is the safety valve for two-passive-bots-refuse-to-engage scenarios
+ * that would otherwise run forever.
+ */
+const DEFAULT_MATCH_TICKS = 2000;
 const SMOKE_MATCH_TICKS = 100;
 const TICK_CPU_BUDGET_MS = 50;
-const SEEDS_PER_OPPONENT = 3;
+/** Seeds per FFA stage. 3 matches × ~8 ships ≈ same wall-cost as the old 12 1v1s. */
+const SEEDS_PER_FFA = 3;
+/** Free-for-all match size including the candidate. */
+export const FFA_MATCH_SIZE = 8;
 
 /**
  * Concrete arena config for evaluation matches.
  *
- * Fixed at 2 ships so each match is a clean 1v1 against one reference
- * opponent. Asteroid count is small to keep computational cost stable
- * across the population.
+ * `shipCount` is passed by the caller — 2 for the smoke 1v1, 8 for FFA.
+ * Asteroid count is small to keep computational cost stable.
  */
-function makeMatchConfig(seed: number, overrides: Partial<GameConfig> = {}): GameConfig {
+function makeMatchConfig(
+  seed: number,
+  shipCount: number,
+  overrides: Partial<GameConfig> = {},
+): GameConfig {
+  // 2800×2100 world = 12× the original area (800×600). At 8 ships on a
+  // ring of radius min(W,H)*0.35 ≈ 735px, ships start ~560px apart —
+  // enough room for real navigation. Asteroid count scales to 24 so the
+  // field stays interesting without being overcrowded.
   return {
-    worldWidth: 800,
-    worldHeight: 600,
+    worldWidth: 2800,
+    worldHeight: 2100,
     seed,
-    asteroidCount: 8,
+    asteroidCount: 24,
     tickMs: 50,
     maxBulletsPerShip: 3,
     bulletSpeed: 8,
@@ -66,7 +87,7 @@ function makeMatchConfig(seed: number, overrides: Partial<GameConfig> = {}): Gam
     shipMaxFuel: 10000,
     asteroidBaseRadius: 25,
     asteroidSpeed: 2.5,
-    shipCount: 2,
+    shipCount,
     ...overrides,
   };
 }
@@ -92,24 +113,33 @@ function tryCompile(
 }
 
 /**
- * Compile every bot in the reference roster into the pool. The returned
- * map is keyed by reference-bot id so the caller can look up an opponent
- * by name when assembling a match.
+ * Compile a set of scripted bots into the pool, keyed by id. Used both for
+ * seeding the initial population from `SEED_TEMPLATES` and for any context
+ * that needs a small lookup of compiled bots.
  */
-export function compileReferenceRoster(
+export function compileBotSet(
   pool: IsolatePool,
-  roster: ScriptedBot[] = REFERENCE_ROSTER,
+  bots: ScriptedBot[],
 ): Map<string, CompiledBot> {
   const out = new Map<string, CompiledBot>();
-  for (const bot of roster) {
+  for (const bot of bots) {
     const { bot: compiled, error } = tryCompile(pool, bot.source);
     if (!compiled) {
-      throw new Error(`Reference bot "${bot.id}" failed to compile: ${error}`);
+      throw new Error(`Seed template "${bot.id}" failed to compile: ${error}`);
     }
     out.set(bot.id, compiled);
   }
   return out;
 }
+
+/**
+ * @deprecated alias for `compileBotSet`. The "reference roster" mental
+ * model is gone — templates seed the population and then evolve.
+ */
+export const compileReferenceRoster = (
+  pool: IsolatePool,
+  roster: ScriptedBot[] = REFERENCE_ROSTER,
+): Map<string, CompiledBot> => compileBotSet(pool, roster);
 
 // ---------------------------------------------------------------------------
 // Fitness construction
@@ -242,42 +272,79 @@ function mergeMatchIntoStats(
 // Match-level helpers
 // ---------------------------------------------------------------------------
 
-/** Determine the outcome for a candidate vs one opponent in a single match. */
+/** Single-match outcome for the candidate. */
 type Outcome = 'W' | 'L' | 'D';
 
-function outcomeFor(
+/**
+ * N-way outcome rule.
+ *
+ *   W: strictly the highest score, OR sole survivor (and there was a fight)
+ *   L: score strictly below the median across all participants
+ *   D: otherwise (mid-pack)
+ *
+ * Survival breaks score ties: tying on score but outliving the others is a W;
+ * tying and dying is an L.
+ */
+export function outcomeForNWay(
   candidateReport: ShipReport | undefined,
-  opponentReport: ShipReport | undefined,
+  allReports: ShipReport[],
 ): Outcome {
-  if (!candidateReport) return 'L';
-  if (!opponentReport) return 'W';
-  if (candidateReport.score > opponentReport.score) return 'W';
-  if (candidateReport.score < opponentReport.score) return 'L';
-  // Equal scores: survival breaks the tie, then draw.
-  if (candidateReport.survived && !opponentReport.survived) return 'W';
-  if (!candidateReport.survived && opponentReport.survived) return 'L';
+  if (!candidateReport || allReports.length === 0) return 'L';
+  if (allReports.length === 1) return 'W'; // sole participant (degenerate)
+
+  const candScore = candidateReport.score;
+  const scoresDesc = allReports.map((r) => r.score).sort((a, b) => b - a);
+  const topScore = scoresDesc[0];
+  const secondScore = scoresDesc[1];
+  const median = scoresDesc[Math.floor(scoresDesc.length / 2)];
+
+  const aliveSet = allReports.filter((r) => r.survived);
+  const candAlive = candidateReport.survived;
+
+  // Strict top score → W.
+  if (candScore === topScore && candScore > secondScore) return 'W';
+  // Sole survivor → W (even if score-tied).
+  if (aliveSet.length === 1 && candAlive) return 'W';
+  // Score-tied at top + alive while another tied is dead → W on survival.
+  if (candScore === topScore && candAlive && !aliveSet.every((r) => r.score === candScore)) {
+    // No-op — fall through to draw/median check.
+  }
+
+  if (candScore < median) return 'L';
+  // Dead and didn't outscore the median? Penalize.
+  if (!candAlive && candScore <= median) return 'L';
   return 'D';
 }
 
-interface RunMatchOpts {
+interface FFAOpts {
   arena: ArenaPlugin;
   pool: IsolatePool;
   candidate: CompiledBot;
-  opponent: CompiledBot;
+  /** Opponents in deterministic slot order (ship-1..ship-N). */
+  opponents: CompiledBot[];
   config: GameConfig;
   maxTicks: number;
 }
 
-interface SingleMatchResult {
+interface FFAResult {
   candidate: ShipReport | undefined;
   outcome: Outcome;
+  /** 1-based rank by score (1 = best). */
+  rank: number;
+  /** Total ships in the match. */
+  size: number;
 }
 
-/** Wire one match: candidate on ship-0, opponent on ship-1. */
-function runOneMatch(opts: RunMatchOpts): SingleMatchResult {
+/**
+ * Wire one free-for-all match: candidate on ship-0, opponents on
+ * ship-1..ship-N. `playMatch` is already ship-count agnostic.
+ */
+function runFreeForAllMatch(opts: FFAOpts): FFAResult {
   const shipBots = new Map<string, CompiledBot>();
   shipBots.set('ship-0', opts.candidate);
-  shipBots.set('ship-1', opts.opponent);
+  for (let i = 0; i < opts.opponents.length; i++) {
+    shipBots.set(`ship-${i + 1}`, opts.opponents[i]);
+  }
 
   const report = playMatch(
     opts.arena,
@@ -289,8 +356,34 @@ function runOneMatch(opts: RunMatchOpts): SingleMatchResult {
   );
 
   const candidate = report.ships.find((r) => r.shipId === 'ship-0');
-  const opponent = report.ships.find((r) => r.shipId === 'ship-1');
-  return { candidate, outcome: outcomeFor(candidate, opponent) };
+  const sortedDesc = [...report.ships].sort((a, b) => b.score - a.score);
+  const rankIdx = sortedDesc.findIndex((r) => r.shipId === 'ship-0');
+  const rank = rankIdx < 0 ? report.ships.length : rankIdx + 1;
+  return {
+    candidate,
+    outcome: outcomeForNWay(candidate, report.ships),
+    rank,
+    size: report.ships.length,
+  };
+}
+
+/** Convenience: 1v1 wrapper for the smoke-test stage. */
+function runOneMatch(opts: {
+  arena: ArenaPlugin;
+  pool: IsolatePool;
+  candidate: CompiledBot;
+  opponent: CompiledBot;
+  config: GameConfig;
+  maxTicks: number;
+}): FFAResult {
+  return runFreeForAllMatch({
+    arena: opts.arena,
+    pool: opts.pool,
+    candidate: opts.candidate,
+    opponents: [opts.opponent],
+    config: opts.config,
+    maxTicks: opts.maxTicks,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -317,10 +410,20 @@ export async function evaluate(
   opts: {
     pool?: IsolatePool;
     ownPool?: boolean;
-    /** Pre-compiled reference roster, keyed by reference-bot id. */
+    /**
+     * Compiled FFA opponents for this evaluation. Sampled from the live
+     * population by the caller (typically top-K + the candidate's own
+     * generation cohort). When empty, FFA stages are skipped.
+     */
+    opponentPool?: CompiledBot[];
+    /**
+     * @deprecated old shape: a Map keyed by hand-coded reference id. New
+     * callers pass `opponentPool` directly. The values of this map are
+     * concatenated into `opponentPool` as a back-compat shim.
+     */
     referenceRoster?: Map<string, CompiledBot>;
     /**
-     * Top-K elites from the current population for self-play matches.
+     * Top-K elites from the current population for the self-play stage.
      * Empty (or absent) means "no self-play this evaluation". Each entry
      * gets compiled into the pool and disposed after the cascade.
      */
@@ -342,6 +445,16 @@ export async function evaluate(
   const pool = opts.pool ?? new IsolatePool();
   const ownPool = opts.ownPool ?? !opts.pool;
   let candidateBot: CompiledBot | null = null;
+  // Smoke-only filler bot: a wait bot that exists purely as a "live"
+  // opponent for the crash gate. Disposed at end of evaluation.
+  let smokeFiller: CompiledBot | null = null;
+
+  // Build the FFA opponent list. New callers pass `opponentPool`; legacy
+  // callers (tests, old wiring) may still pass `referenceRoster` and we
+  // concatenate the values.
+  const opponentPool: CompiledBot[] = [];
+  if (opts.opponentPool) opponentPool.push(...opts.opponentPool);
+  if (opts.referenceRoster) opponentPool.push(...opts.referenceRoster.values());
 
   try {
     // ---- Stage 0: compile gate -------------------------------------------
@@ -359,64 +472,68 @@ export async function evaluate(
 
     const candidate = compileResult.bot;
     candidateBot = candidate;
-    const referenceRoster = opts.referenceRoster ?? compileReferenceRoster(pool);
-
-    // ---- Stage 1: smoke roll-out vs null opponent ------------------------
-    const nullOpponent = referenceRoster.get('ref-null');
-    if (!nullOpponent) {
-      throw new Error('Reference roster is missing ref-null');
-    }
 
     const stats = emptyStats(bot.shipId, 0);
 
+    // ---- Stage 1: smoke 1v1 crash gate -----------------------------------
+    // Uses the first opponent in the pool if available; otherwise compiles
+    // an inline wait bot so the gate still fires even when seedMode='blank'.
     if (config.stages.quickRollout.enabled) {
-      const smokeMatch = runOneMatch({
-        arena,
-        pool,
-        candidate,
-        opponent: nullOpponent,
-        config: makeMatchConfig(11, config.arenaConfig),
-        maxTicks: SMOKE_MATCH_TICKS,
-      });
-      if (mergeMatchIntoStats(stats, smokeMatch.candidate, smokeMatch.outcome)) {
-        stats.signature.push(`ref-null:${smokeMatch.outcome}`);
+      let smokeOpp: CompiledBot | null = opponentPool[0] ?? null;
+      if (!smokeOpp) {
+        const filler = tryCompile(pool, `function tick(s) { return { type: 'wait' }; }`);
+        if (filler.bot) {
+          smokeFiller = filler.bot;
+          smokeOpp = filler.bot;
+        }
+      }
+      if (smokeOpp) {
+        const smokeMatch = runOneMatch({
+          arena,
+          pool,
+          candidate,
+          opponent: smokeOpp,
+          config: makeMatchConfig(11, 2, config.arenaConfig),
+          maxTicks: SMOKE_MATCH_TICKS,
+        });
+        if (mergeMatchIntoStats(stats, smokeMatch.candidate, smokeMatch.outcome)) {
+          stats.signature.push(`smoke:${smokeMatch.outcome}`);
+        }
       }
     }
 
-    if (config.stages.quickGames.enabled || config.stages.fullTournament.enabled) {
-      const opponents = REFERENCE_ROSTER.filter((r) => r.id !== 'ref-null');
+    // ---- Stage 2: FFA against sampled population opponents ---------------
+    if (
+      (config.stages.quickGames.enabled || config.stages.fullTournament.enabled) &&
+      opponentPool.length > 0
+    ) {
       const seeds: number[] = [];
-      for (let i = 0; i < SEEDS_PER_OPPONENT; i++) seeds.push(101 + i * 17);
+      for (let i = 0; i < SEEDS_PER_FFA; i++) seeds.push(101 + i * 17);
 
-      for (const opp of opponents) {
-        const compiledOpp = referenceRoster.get(opp.id);
-        if (!compiledOpp) continue;
-        const outcomes: Outcome[] = [];
+      // Use up to 7 opponents (FFA_MATCH_SIZE - 1). If the pool is smaller,
+      // the FFA just runs with fewer ships — playMatch is N-agnostic.
+      const ffaOpponents = opponentPool.slice(0, FFA_MATCH_SIZE - 1);
 
-        for (const seed of seeds) {
-          const m = runOneMatch({
-            arena,
-            pool,
-            candidate,
-            opponent: compiledOpp,
-            config: makeMatchConfig(seed, config.arenaConfig),
-            maxTicks: DEFAULT_MATCH_TICKS,
-          });
-          if (mergeMatchIntoStats(stats, m.candidate, m.outcome)) {
-            outcomes.push(m.outcome);
-          } else {
-            stats.signature.push(`${opp.id}:E`);
-          }
-        }
-
-        if (outcomes.length) {
-          stats.signature.push(`${opp.id}:${outcomes.join('')}`);
+      for (const seed of seeds) {
+        const m = runFreeForAllMatch({
+          arena,
+          pool,
+          candidate,
+          opponents: ffaOpponents,
+          config: makeMatchConfig(seed, ffaOpponents.length + 1, config.arenaConfig),
+          maxTicks: DEFAULT_MATCH_TICKS,
+        });
+        if (mergeMatchIntoStats(stats, m.candidate, m.outcome)) {
+          stats.signature.push(`ffa:${seed}:${m.outcome}:rank${m.rank}/${m.size}`);
         }
       }
     }
 
-    // ---- Stage 3: self-play vs top-K population elites -------------------
-    // Breaks the fixed-roster ceiling. Generation 0 falls through (empty pool).
+    // ---- Stage 3: self-play vs top-K population elites ------------------
+    // The opponent pool already came from the population, so "self-play" is
+    // now mostly a redundant stage. Keep it as a focused match against the
+    // top-K elites specifically (no pool dilution), which still gives a
+    // meaningful "can you beat the best?" signal.
     const selfPlayCompiled: CompiledBot[] = [];
     try {
       if (
@@ -424,23 +541,34 @@ export async function evaluate(
         opts.selfPlayPool &&
         opts.selfPlayPool.length > 0
       ) {
-        const topK = opts.selfPlayPool.slice(0, config.stages.selfPlay.topK);
+        const topK = opts.selfPlayPool
+          .slice(0, config.stages.selfPlay.topK)
+          .filter((e) => e.shipId !== bot.shipId);
+        const eliteCompiled: CompiledBot[] = [];
         for (const elite of topK) {
-          // Skip the candidate playing itself (same source).
-          if (elite.shipId === bot.shipId) continue;
           const tc = tryCompile(pool, elite.source);
           if (!tc.bot) continue;
           selfPlayCompiled.push(tc.bot);
-          const m = runOneMatch({
+          eliteCompiled.push(tc.bot);
+        }
+        if (eliteCompiled.length > 0) {
+          // Pad to 7 opponents with picks from the broader opponentPool.
+          const opponents: CompiledBot[] = [...eliteCompiled];
+          for (const opp of opponentPool) {
+            if (opponents.length >= FFA_MATCH_SIZE - 1) break;
+            if (!opponents.includes(opp)) opponents.push(opp);
+          }
+          const m = runFreeForAllMatch({
             arena,
             pool,
             candidate,
-            opponent: tc.bot,
-            config: makeMatchConfig(901 + selfPlayCompiled.length, config.arenaConfig),
+            opponents,
+            config: makeMatchConfig(901, opponents.length + 1, config.arenaConfig),
             maxTicks: DEFAULT_MATCH_TICKS,
           });
           if (mergeMatchIntoStats(stats, m.candidate, m.outcome)) {
-            stats.signature.push(`selfplay:${elite.shipId}:${m.outcome}`);
+            const eliteIds = topK.map((e) => e.shipId).join(',');
+            stats.signature.push(`selfplay:[${eliteIds}]:${m.outcome}:rank${m.rank}/${m.size}`);
           }
         }
       }
@@ -470,10 +598,12 @@ export async function evaluate(
   } finally {
     if (ownPool) {
       pool.cleanup();
-    } else if (candidateBot) {
-      // Shared pool: only dispose this candidate, leave the reference
-      // roster (and other candidates) intact.
-      pool.destroy(candidateBot);
+    } else {
+      // Shared pool: only dispose what *this* evaluation compiled (the
+      // candidate + any smoke filler). Leave the caller-owned opponentPool
+      // and other candidates intact.
+      if (candidateBot) pool.destroy(candidateBot);
+      if (smokeFiller) pool.destroy(smokeFiller);
     }
   }
 }

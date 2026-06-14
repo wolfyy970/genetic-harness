@@ -83,7 +83,10 @@ describe('Self-play cascade stage', () => {
     expect(result.error).toBeUndefined();
   }, 30_000);
 
-  it('runs self-play matches against the supplied pool', async () => {
+  it('runs a self-play FFA match against the supplied pool', async () => {
+    // Under the FFA cascade, self-play is a single match: candidate +
+    // top-K elites + roster-fill to reach 8 ships. So adding any non-empty
+    // pool of elites increases totalMatches by exactly 1.
     const config = loadConfig({
       llmBaseUrl: 'mock',
       stages: { ...QUICK_STAGES, selfPlay: { enabled: true, topK: 2 } },
@@ -97,13 +100,12 @@ describe('Self-play cascade stage', () => {
       selfPlayPool: [elite1, elite2],
     });
 
-    // Self-play adds 2 matches (one per elite). totalMatches grows accordingly.
-    expect(withPool.fitness.totalMatches - without.fitness.totalMatches).toBe(2);
+    expect(withPool.fitness.totalMatches - without.fitness.totalMatches).toBe(1);
   }, 60_000);
 
   it('skips self-play opponents that share the candidate shipId', async () => {
-    // If population.getTopK includes the candidate itself (because the
-    // mutation came from a re-evaluation), don't make it fight itself.
+    // With one self-elite filtered out and one real elite left, self-play
+    // still runs (one FFA match) → +1 match vs the no-self-play baseline.
     const config = loadConfig({
       llmBaseUrl: 'mock',
       stages: { ...QUICK_STAGES, selfPlay: { enabled: true, topK: 2 } },
@@ -115,8 +117,25 @@ describe('Self-play cascade stage', () => {
     const result = await evaluate(bot, 'asteroids', config, {
       selfPlayPool: [sameId, otherElite],
     });
-    // Only the non-self elite should add a match; total is roster + 1.
     const baseline = await evaluate(bot, 'asteroids', config, { selfPlayPool: [] });
     expect(result.fitness.totalMatches - baseline.fitness.totalMatches).toBe(1);
+  }, 60_000);
+
+  it('runs no self-play when every pool entry shares the candidate shipId', async () => {
+    // Pool consists solely of bots that match the candidate's shipId → all
+    // filtered → no FFA → totalMatches unchanged.
+    const config = loadConfig({
+      llmBaseUrl: 'mock',
+      stages: { ...QUICK_STAGES, selfPlay: { enabled: true, topK: 2 } },
+    });
+    const sameId1 = makeBot('cand', SOURCE_WAIT);
+    const sameId2 = makeBot('cand', SOURCE_WAIT);
+    const bot = makeBot('cand', SOURCE_FIRE);
+
+    const result = await evaluate(bot, 'asteroids', config, {
+      selfPlayPool: [sameId1, sameId2],
+    });
+    const baseline = await evaluate(bot, 'asteroids', config, { selfPlayPool: [] });
+    expect(result.fitness.totalMatches - baseline.fitness.totalMatches).toBe(0);
   }, 60_000);
 });

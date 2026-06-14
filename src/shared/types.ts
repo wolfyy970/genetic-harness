@@ -39,6 +39,14 @@ export interface ShipState {
 }
 
 /**
+ * Discrete asteroid size tiers — arcade-style.
+ *
+ * Real Asteroids has exactly three sizes: large → splits into 2 medium,
+ * medium → 2 small, small → destroyed. Smaller chunks are faster.
+ */
+export type AsteroidTier = 'LARGE' | 'MEDIUM' | 'SMALL';
+
+/**
  * An asteroid entity in the arena.
  *
  * Has mass-based physics, health, splits into fragments when destroyed,
@@ -55,6 +63,8 @@ export interface Asteroid {
   radius: number;
   health: number;
   mass: number;
+  /** Size class — drives radius, fragment count, score. */
+  tier: AsteroidTier;
   /** 6–10 vertex offsets from `pos`, ordered counter-clockwise. */
   vertices: Vector2D[];
   /** Current rotation in radians. */
@@ -186,9 +196,14 @@ export interface BotState {
  * A bot action that controls a ship's behavior.
  *
  * Actions are mutually exclusive — a bot can only perform one action per tick.
+ *
+ * `thrust` is ship-relative: `direction: 1` accelerates forward along
+ * `ship.angle`; `direction: -1` accelerates retrograde (along
+ * `ship.angle + π`). This matches arcade Asteroids — turn to aim, thrust to
+ * move — plus a clean "brake" via reverse thrust.
  */
 export type BotAction =
-  | { type: 'thrust'; angle: number }
+  | { type: 'thrust'; direction: -1 | 1 }
   | { type: 'rotate'; direction: -1 | 1 }
   | { type: 'fire' }
   | { type: 'wait' };
@@ -269,10 +284,14 @@ export interface ReplayFrame {
     radius?: number;
     health?: number;
     shield?: number;
+    /** Ships only: per-tick score (schema 4+). Older replays omit. */
+    score?: number;
     /** Asteroids only: polygon vertex offsets (schema 2+). Older replays omit. */
     vertices?: Vector2D[];
     /** Asteroids only: current rotation in radians (schema 2+). */
     rotation?: number;
+    /** Asteroids only: discrete size tier (schema 3+). Older replays omit. */
+    tier?: AsteroidTier;
   }>;
   tick: number;
 }
@@ -447,6 +466,49 @@ export interface HarnessConfig {
   replaySampleEvery: number;
   /** Rolling window: older generations get pruned. (Slice 6.) */
   replayKeepGenerations: number;
+
+  /**
+   * If true, wipe `archiveDir` (leaderboard, manifest, replays) before
+   * starting the run. Pairs with `seedFromArchive`: set both false to
+   * resume the previous archive in-place; set this true to start fully
+   * clean; set seedFromArchive true to carry elites forward into a new
+   * empty archive.
+   */
+  clearArchiveBeforeRun: boolean;
+
+  /**
+   * Carry top elites from the previous run into the new population as
+   * additional seeds. Always *additive* — boilerplate makeSeedBot still
+   * runs per island so diversity is bounded below. Carry-overs are
+   * re-evaluated through the cascade before joining the population.
+   */
+  seedFromArchive: {
+    enabled: boolean;
+    /** How many top archived bots to carry over. */
+    count: number;
+  };
+
+  /**
+   * Initial-population strategy for a fresh run (when `seedFromArchive` is
+   * off or the archive is empty).
+   *
+   * - `diverse` (default): ask the LLM to generate ~50 distinct bot
+   *   strategies sampled across the Cartesian product of behavioural axes
+   *   (aggression × target preference × movement × engagement range ×
+   *   reverse-thrust use). One LLM call at startup; richest initial
+   *   diversity. Requires a reachable LLM.
+   * - `curated`: seed with the 8 hand-coded templates (Null, Random,
+   *   Aggressive, Evasive, Sniper, Hunter, Drifter, Berserker). Useful for
+   *   offline/fast-iteration runs.
+   * - `minimal`: seed with just the boilerplate "active" seed bot.
+   * - `blank`: seed with a single `function tick(s) { return { type: 'wait' }; }`
+   *   bot — pure emergence, no anchors.
+   *
+   * All seed modes produce *mutable* bots: the LLM mutates them across
+   * generations and they get displaced from their MAP-Elites cell by
+   * anything fitter in the same niche.
+   */
+  seedMode: 'diverse' | 'curated' | 'minimal' | 'blank';
 }
 
 /**
@@ -523,7 +585,10 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   leaderboardSize: 50,
   recordReplays: false,
   replayCount: 2,
-  replayMaxFrames: 1500,
+  replayMaxFrames: 2500,
   replaySampleEvery: 1,
   replayKeepGenerations: 20,
+  clearArchiveBeforeRun: false,
+  seedFromArchive: { enabled: false, count: 0 },
+  seedMode: 'diverse',
 };

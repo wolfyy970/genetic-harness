@@ -16,7 +16,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { join, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ArchivedBot } from './shared/types.js';
@@ -296,6 +296,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       apiKeyConfigured: Boolean(config.llmApiKey && config.llmApiKey.length > 0),
       mode: config.mode,
       arena: config.arena,
+      clearArchiveBeforeRun: config.clearArchiveBeforeRun,
+      seedFromArchive: config.seedFromArchive,
+      seedMode: config.seedMode,
     });
     return;
   }
@@ -307,6 +310,45 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       archiveDir,
       serverStartTime: SERVER_START_TIME,
     });
+    return;
+  }
+
+  if (url.pathname === '/api/archive-state') {
+    // Surfaces "what's on disk" so the run-control form can show:
+    //   "clear archive (47 bots, 168 replays, last gen 12)"
+    //   "carry top N elites (of 47 available)"
+    // — and so the user never has to guess what `clearArchiveBeforeRun` will do.
+    try {
+      const board = loadLeaderboard(archiveDir);
+      const manifest = loadManifest(archiveDir);
+      let totalReplays = 0;
+      let lastGen = 0;
+      try {
+        const genDir = join(archiveDir, 'generations');
+        if (existsSync(genDir)) {
+          const subdirs = readdirSync(genDir, { withFileTypes: true })
+            .filter((e) => e.isDirectory() && /^gen-\d{4,}$/.test(e.name));
+          for (const d of subdirs) {
+            const files = readdirSync(join(genDir, d.name));
+            totalReplays += files.filter((f) => f.endsWith('.json')).length;
+            const gen = Number(d.name.slice(4));
+            if (gen > lastGen) lastGen = gen;
+          }
+        }
+      } catch {
+        /* fall back to whatever we already accumulated */
+      }
+      const exists = (board?.length ?? 0) > 0 || manifest !== null;
+      sendJson(res, 200, {
+        exists,
+        leaderboardSize: board?.length ?? 0,
+        lastRunId: manifest?.runId ?? null,
+        lastGen: manifest?.generations?.length ? manifest.generations[manifest.generations.length - 1].generation : lastGen,
+        totalReplays,
+      });
+    } catch (err) {
+      sendJson(res, 200, { exists: false, leaderboardSize: 0, lastRunId: null, lastGen: 0, totalReplays: 0 });
+    }
     return;
   }
 

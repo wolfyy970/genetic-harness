@@ -1,0 +1,3 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`BOT_AUTHOR_MANUAL — byte stability > matches the snapshotted hash (intentional changes should require updating this) 1`] = `"125d8653"`;

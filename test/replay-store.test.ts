@@ -132,7 +132,7 @@ function makeReplay(generation: number, matchId: string): ReplayFile {
         ticksAlive: 42,
         cpuNanosTotal: '12345',
         cpuNanosMax: '999',
-        histogram: { thrust: 1, rotate: 2, fire: 3, wait: 4, invalid: 0 },
+        histogram: { thrust: 1, thrustFwd: 1, thrustRev: 0, rotate: 2, fire: 3, wait: 4, invalid: 0 },
         survived: true,
       },
     ],

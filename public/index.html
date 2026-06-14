@@ -9,7 +9,18 @@
     <header>
       <h1>genetic-harness</h1>
       <div class="status" id="status">loading…</div>
+      <div class="auth-status" id="auth-status" hidden>
+        <span>🔓 authed</span>
+        <button type="button" id="auth-logout" title="Clear stored auth token">log out</button>
+      </div>
     </header>
+
+    <div class="auth-banner" id="auth-banner" hidden>
+      <span>🔒 token required</span>
+      <input type="password" id="auth-input" placeholder="HARNESS_TOKEN" autocomplete="off" />
+      <button type="button" id="auth-save">Save</button>
+      <span class="auth-error" id="auth-error" hidden></span>
+    </div>
 
     <section class="panel run-control" id="run-panel">
       <h2>Run control</h2>
@@ -31,30 +42,51 @@
             <option value="weighted">weighted</option>
           </select>
         </label>
-        <label class="wide">
-          model
-          <span class="input-row">
-            <select name="llmModel" id="model-select">
-              <option value="">Select a model...</option>
-            </select>
-            <button type="button" id="refresh-models" title="Refresh model list">↻</button>
-          </span>
-        </label>
-        <label class="wide">
-          base URL
-          <input type="text" name="llmBaseUrl" placeholder="loading…" />
+        <label>
+          seed
+          <select name="seedMode" id="seed-mode-select">
+            <option value="diverse">diverse (LLM gen ~50 bots)</option>
+            <option value="curated">curated (8 templates)</option>
+            <option value="minimal">minimal (1 active seed)</option>
+            <option value="blank">blank (1 wait bot)</option>
+          </select>
+          <span class="hint" title="diverse = LLM generates a varied starting population across behavioural axes (best). curated = 8 hand-coded templates. minimal = 1 active boilerplate. blank = single wait bot (pure emergence).">?</span>
         </label>
         <label class="check">
           <input type="checkbox" name="recordReplays" checked />
           record replays
         </label>
         <label class="check">
-          <input type="checkbox" name="useMockLLM" checked />
-          mock LLM
+          <input type="checkbox" name="clearArchiveBeforeRun" />
+          <span id="clear-archive-label">clear archive</span>
+          <span class="hint" title="Wipe leaderboard.json, manifest.json, and stored replays before starting. Use with 'carry elites' to start a fresh archive but keep your best bots.">?</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" name="seedFromArchive" />
+          carry top
+          <input type="number" name="seedFromArchiveCount" min="0" max="50" step="1" value="2" class="tiny-num" />
+          <span id="seed-from-archive-label">elites</span>
+          <span class="hint" title="Load the top-N bots from the previous run's leaderboard.json and re-evaluate them as additional seeds alongside the boilerplate. Drops anything that fails to compile.">?</span>
         </label>
         <button type="submit" id="start-run">Start run</button>
         <button type="button" id="stop-run" disabled>Stop</button>
+        <div class="conn-row">
+          <label class="wide">
+            model
+            <span class="input-row">
+              <select name="llmModel" id="model-select">
+                <option value="">Select a model...</option>
+              </select>
+              <button type="button" id="refresh-models" title="Refresh model list">↻</button>
+            </span>
+          </label>
+          <label class="wide">
+            base URL
+            <input type="text" name="llmBaseUrl" placeholder="loading…" />
+          </label>
+        </div>
       </form>
+      <div class="archive-state" id="archive-state" aria-live="polite"></div>
       <div class="run-status" id="run-status">no active run</div>
     </section>
 
@@ -86,26 +118,92 @@
         <pre class="bot-source"><code id="bot-source-code">Click a bot in the leaderboard to inspect its source code.</code></pre>
       </section>
 
-      <section class="panel" id="player-panel">
+      <section class="panel" id="player-panel" tabindex="0">
         <h2>Replay</h2>
+        <div class="replay-filters">
+          <label>
+            generation
+            <select id="filter-generation">
+              <option value="all">all</option>
+              <option value="latest" selected>latest</option>
+            </select>
+          </label>
+          <label>
+            topology
+            <select id="filter-topology">
+              <option value="all" selected>all</option>
+              <option value="ffa">FFA</option>
+              <option value="selfplay">self-play</option>
+              <option value="1v1">1v1</option>
+            </select>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="filter-hero-only" />
+            only my selected bot
+          </label>
+        </div>
         <div class="replay-controls">
           <select id="replay-select"></select>
-          <button id="play-pause" type="button">▶</button>
-          <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
-          <span class="status" id="frame-info">—</span>
         </div>
-        <div class="canvas-wrap">
-          <canvas id="canvas" width="800" height="600"></canvas>
+        <div class="replay-transport">
+          <button id="step-first" type="button" title="First frame (Home)">⏮</button>
+          <button id="step-prev" type="button" title="Previous frame (←)">◀</button>
+          <button id="play-pause" type="button" title="Play / pause (Space)">▶</button>
+          <button id="step-next" type="button" title="Next frame (→)">▶</button>
+          <button id="step-last" type="button" title="Last frame (End)">⏭</button>
+          <button id="restart" type="button" title="Restart (R)">↻</button>
+          <label class="speed-label">
+            speed
+            <select id="speed-select" title="Playback speed (1-5)">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+          </label>
+          <label class="loop-label" title="Loop at end (L)">
+            <input type="checkbox" id="loop-toggle" checked />
+            loop
+          </label>
+          <span class="loop-indicator" id="loop-indicator" aria-hidden="true">↻</span>
+        </div>
+        <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
+        <div class="replay-context" id="replay-context">
+          <span class="status" id="frame-info">—</span>
+          <span class="status" id="tick-info">tick —</span>
+          <span class="status" id="alive-info">—</span>
+          <span class="status" id="speed-info">1×</span>
+        </div>
+        <div class="replay-stage">
+          <div class="canvas-wrap">
+            <canvas id="canvas" width="800" height="600"></canvas>
+          </div>
+          <div class="scoreboard" id="scoreboard" aria-label="ships in this match">
+            <div class="scoreboard-header">
+              <span>ships</span>
+              <span class="hint" title="Hover a row to highlight that ship on the canvas. ★ marks the candidate (the bot being evolved).">?</span>
+            </div>
+            <div class="scoreboard-rows" id="scoreboard-rows"></div>
+          </div>
         </div>
         <div class="legend" id="legend"></div>
       </section>
 
       <section class="panel" id="grid-panel">
         <h2>MAP-Elites grid · aggression × log&nbsp;fuel</h2>
-        <div id="grid" class="grid-heatmap"></div>
-        <div class="grid-axes">
-          <span>aggression ↑</span>
-          <span>log fuel/tick →</span>
+        <div class="grid-frame">
+          <div class="grid-y-label">
+            <span>fire-heavy</span>
+            <span class="grid-axis-name">aggression</span>
+            <span>peaceful</span>
+          </div>
+          <div id="grid" class="grid-heatmap"></div>
+        </div>
+        <div class="grid-x-label">
+          <span>cheap (~1µs/tick)</span>
+          <span class="grid-axis-name">log fuel ns/tick</span>
+          <span>expensive (~1ms/tick)</span>
         </div>
       </section>
 

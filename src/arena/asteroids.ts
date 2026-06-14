@@ -23,12 +23,14 @@ import { createWorld, worldTick, spawnBullet } from '../engine/world.js';
 import { detectCollisions } from '../engine/collision.js';
 import { toReplayFrame } from '../engine/renderer.js';
 
-// Default config
+// Default config — 12× the original 800×600 area to give 8 FFA ships room
+// to navigate. Evaluator / replay configs override this anyway, but the
+// arena plugin needs sensible defaults for any direct `init()` call.
 const DEFAULTS: Partial<GameConfig> = {
-  worldWidth: 1200,
-  worldHeight: 800,
+  worldWidth: 2800,
+  worldHeight: 2100,
   seed: 42,
-  asteroidCount: 8,
+  asteroidCount: 24,
   tickMs: 50,
   maxBulletsPerShip: 3,
   bulletSpeed: 8,

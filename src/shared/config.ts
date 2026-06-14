@@ -25,6 +25,20 @@ function envOverrides(): Partial<HarnessConfig> {
   if (process.env.HARNESS_LLM_MODEL) out.llmModel = process.env.HARNESS_LLM_MODEL;
   if (process.env.HARNESS_LLM_API_KEY) out.llmApiKey = process.env.HARNESS_LLM_API_KEY;
   if (process.env.HARNESS_ARCHIVE_DIR) out.archiveDir = process.env.HARNESS_ARCHIVE_DIR;
+
+  if (process.env.HARNESS_CLEAR_ARCHIVE_BEFORE_RUN !== undefined) {
+    out.clearArchiveBeforeRun = process.env.HARNESS_CLEAR_ARCHIVE_BEFORE_RUN === '1' ||
+      process.env.HARNESS_CLEAR_ARCHIVE_BEFORE_RUN.toLowerCase() === 'true';
+  }
+  if (process.env.HARNESS_SEED_FROM_ARCHIVE !== undefined) {
+    const enabled = process.env.HARNESS_SEED_FROM_ARCHIVE === '1' ||
+      process.env.HARNESS_SEED_FROM_ARCHIVE.toLowerCase() === 'true';
+    const count = process.env.HARNESS_SEED_FROM_ARCHIVE_COUNT
+      ? Math.max(0, Math.floor(Number(process.env.HARNESS_SEED_FROM_ARCHIVE_COUNT)))
+      : (enabled ? 2 : 0);
+    out.seedFromArchive = { enabled, count };
+  }
+
   return out;
 }
 

@@ -25,10 +25,11 @@ export const WORLD_WRAP = true;
  */
 export function wrapPosition(pos: Vector2D, width: number, height: number): Vector2D {
   if (!WORLD_WRAP) return pos;
-  return {
-    x: ((pos.x % width) + width) % width,
-    y: ((pos.y % height) + height) % height,
-  };
+  // In-place mutation — every caller (ship, asteroid, bullet) discards the
+  // return value and expects `pos` to be wrapped on the same object.
+  pos.x = ((pos.x % width) + width) % width;
+  pos.y = ((pos.y % height) + height) % height;
+  return pos;
 }
 
 /**
@@ -53,6 +54,51 @@ export function clamp(val: number, min: number, max: number): number {
 export function dist(a: Vector2D, b: Vector2D): number {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * Shortest signed delta from `a` to `b` on a toroidal world.
+ *
+ * Real Asteroids wraps: the shortest path between two points on a torus
+ * may cross the seam. This returns `{ dx, dy }` in [-W/2, W/2) × [-H/2, H/2),
+ * i.e. the displacement of `b` from `a` taking the shortest wrap-aware path.
+ *
+ * @param a      Origin point.
+ * @param b      Target point.
+ * @param width  World width (toroidal modulus on x).
+ * @param height World height (toroidal modulus on y).
+ */
+export function toroidalDelta(
+  a: Vector2D,
+  b: Vector2D,
+  width: number,
+  height: number,
+): { dx: number; dy: number } {
+  let dx = b.x - a.x;
+  let dy = b.y - a.y;
+  const halfW = width / 2;
+  const halfH = height / 2;
+  if (dx > halfW) dx -= width;
+  else if (dx < -halfW) dx += width;
+  if (dy > halfH) dy -= height;
+  else if (dy < -halfH) dy += height;
+  return { dx, dy };
+}
+
+/**
+ * Shortest Euclidean distance between two points on a toroidal world.
+ *
+ * Uses {@link toroidalDelta} under the hood. Two points 5 px apart across
+ * the right/left seam are 5 px (not `width - 5`) apart by this metric.
+ */
+export function toroidalDist(
+  a: Vector2D,
+  b: Vector2D,
+  width: number,
+  height: number,
+): number {
+  const { dx, dy } = toroidalDelta(a, b, width, height);
   return Math.sqrt(dx * dx + dy * dy);
 }
 

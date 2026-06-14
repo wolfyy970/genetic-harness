@@ -49,7 +49,7 @@ describe('Bundler', () => {
   it('includes the tick function in output', () => {
     const source = `
       export function tick(botState: any): any {
-        return { type: 'thrust', angle: 0 };
+        return { type: 'thrust', direction: 1 };
       }
     `;
     const bundled = bundle(source);

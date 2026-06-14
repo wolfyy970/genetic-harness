@@ -100,7 +100,8 @@ describe('Utils', () => {
 
 describe('Actions', () => {
   it('parses string actions', () => {
-    expect(parseBotAction('thrust')).toEqual({ type: 'thrust', angle: 0 });
+    expect(parseBotAction('thrust')).toEqual({ type: 'thrust', direction: 1 });
+    expect(parseBotAction('reverse')).toEqual({ type: 'thrust', direction: -1 });
     expect(parseBotAction('rotate-left')).toEqual({ type: 'rotate', direction: -1 });
     expect(parseBotAction('rotate-right')).toEqual({ type: 'rotate', direction: 1 });
     expect(parseBotAction('fire')).toEqual({ type: 'fire' });
@@ -109,15 +110,20 @@ describe('Actions', () => {
   });
 
   it('parses object actions', () => {
-    expect(parseBotAction({ type: 'thrust', angle: 1.57 })).toEqual({
+    expect(parseBotAction({ type: 'thrust', direction: 1 })).toEqual({
       type: 'thrust',
-      angle: 1.57,
+      direction: 1,
+    });
+    expect(parseBotAction({ type: 'thrust', direction: -1 })).toEqual({
+      type: 'thrust',
+      direction: -1,
     });
     expect(parseBotAction({ type: 'fire' })).toEqual({ type: 'fire' });
   });
 
   it('describes actions correctly', () => {
-    expect(describeAction({ type: 'thrust', angle: 0 })).toContain('thrust');
+    expect(describeAction({ type: 'thrust', direction: 1 })).toContain('forward');
+    expect(describeAction({ type: 'thrust', direction: -1 })).toContain('reverse');
     expect(describeAction({ type: 'fire' })).toBe('fire');
     expect(describeAction({ type: 'wait' })).toBe('wait');
   });
@@ -146,7 +152,7 @@ describe('World', () => {
   it('creates a world with the correct number of ships', () => {
     const world = createWorld(config);
     expect(world.ships.length).toBeGreaterThan(0);
-    expect(world.ships.length).toBeLessThanOrEqual(4);
+    expect(world.ships.length).toBeLessThanOrEqual(16);
   });
 
   it('creates a world with the correct number of asteroids', () => {
@@ -170,12 +176,14 @@ describe('World', () => {
 
   it('world tick advances ship positions', () => {
     const world = createWorld(config);
-    const initialPos = { ...world.ships[0].pos };
+    // Force ship[0] to face +x (angle=0) for a deterministic thrust direction.
+    world.ships[0].angle = 0;
+    world.ships[0].vel = { x: 0, y: 0 };
     const actions = new Map<string, any>();
-    actions.set(world.ships[0].id, { type: 'thrust' as const, angle: 0 });
+    actions.set(world.ships[0].id, { type: 'thrust' as const, direction: 1 });
     const updated = worldTick(world, actions);
     const ship = updated.ships[0];
-    // Ship should have moved due to thrust
+    // Ship should have moved due to forward thrust along +x.
     expect(ship.vel.x).toBeGreaterThan(0);
   });
 
@@ -245,6 +253,7 @@ describe('Collision', () => {
       ...collisionConfig,
       seed: 200,
     });
+    world.tick = 100; // past spawn-grace
     // Move an asteroid close to a ship
     const ship = world.ships[0];
     const asteroid = world.asteroids[0];
@@ -253,6 +262,64 @@ describe('Collision', () => {
     const collisions = detectCollisions(world);
     const shipHit = collisions.find((c) => c.type === 'asteroid_ship');
     expect(shipHit).toBeDefined();
+  });
+
+  it('ship-ship collision damages both ships symmetrically', () => {
+    const world = createWorld({ ...collisionConfig, seed: 1, shipCount: 2 });
+    world.tick = 100; // past spawn-grace
+    const [a, b] = world.ships;
+    // Place both ships at the same point with high closing velocity.
+    a.pos = { x: 200, y: 200 };
+    b.pos = { x: 200, y: 200 };
+    a.vel = { x: 4, y: 0 };
+    b.vel = { x: -4, y: 0 };
+    const hpA = a.health, hpB = b.health;
+    detectCollisions(world);
+    expect(a.health).toBeLessThan(hpA);
+    expect(b.health).toBeLessThan(hpB);
+    expect(a.health).toBeCloseTo(b.health, 6);
+  });
+
+  it("a ship's own bullet does not damage the firer (no self-damage)", () => {
+    const world = createWorld({ ...collisionConfig, seed: 2, shipCount: 1 });
+    world.tick = 100; // past spawn-grace
+    const ship = world.ships[0];
+    const beforeHp = ship.health;
+    world.bullets.push({
+      id: 'b-self',
+      type: 'bullet',
+      pos: { x: ship.pos.x, y: ship.pos.y },
+      vel: { x: 0, y: 0 },
+      damage: 25,
+      owner: ship.id,
+      age: 0,
+      maxAge: 60,
+    });
+    detectCollisions(world);
+    expect(ship.health).toBe(beforeHp);
+  });
+
+  it('bullets wrap around the screen edges (toroidal arena)', () => {
+    const world = createWorld({
+      ...collisionConfig,
+      seed: 9,
+      asteroidCount: 0,
+      shipCount: 1,
+    });
+    world.bullets.push({
+      id: 'b1',
+      type: 'bullet',
+      pos: { x: collisionConfig.worldWidth - 5, y: 100 },
+      vel: { x: 10, y: 0 },
+      damage: 25,
+      owner: 'nobody',
+      age: 0,
+      maxAge: 60,
+    });
+    const next = worldTick(world, new Map());
+    // Bullet should have wrapped to the left side.
+    expect(next.bullets.length).toBe(1);
+    expect(next.bullets[0].pos.x).toBeLessThan(collisionConfig.worldWidth / 2);
   });
 });
 

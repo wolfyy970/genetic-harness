@@ -52,25 +52,39 @@ beforeAll(async () => {
   viewer = await import(url.href);
 });
 
-const META = { width: 800, height: 600, heroShipId: 'ship-0' };
+// Pass world dims that match the canvas dims so scale = 1 and the
+// recorded canvas operations land at the same coordinates the tests
+// historically expected. (The viewer now scales world→canvas internally;
+// scale=1 makes tests' coordinate assertions still meaningful.)
+const META = {
+  width: 1280, height: 960,
+  worldWidth: 1280, worldHeight: 960,
+  heroShipId: 'ship-0',
+};
 
 function frame(entities: unknown[]) {
   return { type: 'asteroids' as const, tick: 1, entities } as never;
 }
 
 describe('asteroids viewer', () => {
-  it('exports dimensions matching the arena world size', () => {
-    expect(viewer.dimensions.width).toBe(800);
-    expect(viewer.dimensions.height).toBe(600);
+  it('exports a 4:3 drawing-surface dimension (1280x960)', () => {
+    // 1280x960 matches the world's 4:3 aspect and fits typical laptop
+    // viewports after CSS `width: 100%` scaling. The viewer applies a
+    // world→canvas scale at paint time using `meta.worldWidth/Height`.
+    expect(viewer.dimensions.width).toBe(1280);
+    expect(viewer.dimensions.height).toBe(960);
   });
 
-  it('legend reports four entries (candidate / opponent / asteroid / bullet)', () => {
+  it('legend enumerates entity types (asteroid tiers + bullet); ships handled by scoreboard', () => {
     const items = viewer.legend();
     expect(items.length).toBe(4);
+    // Slice 4 of the UX overhaul: ships moved out of the legend into a
+    // dedicated per-ship scoreboard panel; the legend now lists only the
+    // non-ship entity types so the user can map asteroid sizes at a glance.
     expect(items.map((i) => i.label)).toEqual([
-      'candidate',
-      'opponent',
-      'asteroid',
+      'asteroid (large)',
+      'asteroid (medium)',
+      'asteroid (small)',
       'bullet',
     ]);
   });

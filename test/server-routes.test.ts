@@ -159,6 +159,48 @@ describe('GET /api/manifest', () => {
   });
 });
 
+describe('GET /api/archive-state', () => {
+  it('returns exists:false when the archive is fresh', async () => {
+    const res = await fetch(`${baseUrl}/api/archive-state`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.exists).toBe(false);
+    expect(body.leaderboardSize).toBe(0);
+    expect(body.totalReplays).toBe(0);
+  });
+
+  it('reports population + replay counts when the archive is populated', async () => {
+    writeLeaderboard(tmp, [makeBot('a', 0.9), makeBot('b', 0.8)]);
+    writeReplay(tmp, makeReplay(2, 'gen0002-cand-vs-ref'));
+    writeReplay(tmp, makeReplay(3, 'gen0003-cand-vs-ref'));
+    appendGenerationToManifest(tmp, {
+      runId: 'run-archive-state',
+      arena: 'asteroids',
+      sanitizedConfig: {} as Omit<HarnessConfig, 'llmApiKey'>,
+      entry: { generation: 3, bestFitness: 0.9, bestShipId: 'a', replays: [] },
+      leaderboard: [],
+      mapElitesGrid: [],
+      generationStats: {
+        generation: 3,
+        bestFitness: 0.9,
+        bestWinRate: 0.5,
+        meanFitness: 0.5,
+        meanFuel: 1000,
+        archiveSize: 2,
+      },
+    });
+
+    const res = await fetch(`${baseUrl}/api/archive-state`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.exists).toBe(true);
+    expect(body.leaderboardSize).toBe(2);
+    expect(body.totalReplays).toBe(2);
+    expect(body.lastRunId).toBe('run-archive-state');
+    expect(body.lastGen).toBe(3);
+  });
+});
+
 describe('GET /api/replays/:gen/:matchId', () => {
   it('serves a stored replay file', async () => {
     const file = makeReplay(7, 'gen0007-cand-vs-ref-x');

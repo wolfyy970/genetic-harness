@@ -11,6 +11,7 @@ import type {
   Vector2D,
   ShipState,
   Asteroid,
+  AsteroidTier,
   Bullet,
   Entity,
   GameState,
@@ -21,6 +22,7 @@ import type {
 import {
   wrapPosition,
   dist,
+  toroidalDist,
   angleBetween,
   SeededRNG,
   clamp,
@@ -30,14 +32,85 @@ import { applyActionToShip } from './actions.js';
 import { logger } from '../shared/logger.js';
 
 // =============================================================================
+// Asteroid Tier Table
+// =============================================================================
+
+/**
+ * Per-tier asteroid parameters. Real Asteroids has three discrete sizes:
+ * LARGE → 2 MEDIUM → 2 SMALL → destroyed. Smaller chunks are faster.
+ *
+ * `health = 1` for all tiers; bullet damage 25 destroys any tier in one hit
+ * (arcade parity). Score table is keyed by tier (Small worth most).
+ */
+export interface AsteroidTierSpec {
+  radius: number;
+  health: number;
+  vertexCount: number;
+  splitInto: AsteroidTier | null;
+  splitCount: number;
+  /** Speed multiplier applied to a fragment relative to its parent. */
+  speedFactor: number;
+}
+
+export const ASTEROID_TIERS: Record<AsteroidTier, AsteroidTierSpec> = {
+  LARGE: {
+    radius: 45,
+    health: 1,
+    vertexCount: 10,
+    splitInto: 'MEDIUM',
+    splitCount: 2,
+    speedFactor: 1.0, // parent reference
+  },
+  MEDIUM: {
+    radius: 25,
+    health: 1,
+    vertexCount: 8,
+    splitInto: 'SMALL',
+    splitCount: 2,
+    speedFactor: 1.5,
+  },
+  SMALL: {
+    radius: 12,
+    health: 1,
+    vertexCount: 6,
+    splitInto: null,
+    splitCount: 0,
+    speedFactor: 1.5,
+  },
+};
+
+// =============================================================================
 // Constants
 // =============================================================================
 
 const MAX_BULLETS = 128;
-const BULLET_LIFETIME = 60;
+/**
+ * Bullet lifetime in ticks. At bullet-speed 8 px/tick × 200 ticks =
+ * 1600px range ≈ 57% of the 2800px world width. Lets bots fire across
+ * mid-range engagements; long enough for lead-the-target tactics to work
+ * but bullets still expire before lapping the toroidal world.
+ */
+const BULLET_LIFETIME = 200;
 const ASTEROID_SPAWN_MARGIN = 100;
 const ASTEROID_MARGIN = ASTEROID_SPAWN_MARGIN;
-const FRICTION = 0.999;
+/**
+ * Minimum spawn-time clearance between an asteroid and any ship.
+ * With 8 ships on a circle of radius ~210, this avoids cluster.
+ */
+const SHIP_ASTEROID_SPAWN_CLEARANCE = 200;
+/**
+ * Spawn invulnerability window (in ticks). Real Asteroids gives the player
+ * a brief invulnerable spawn — same idea here so 8-way FFA starts don't
+ * immediately self-eliminate via two ships' trajectories crossing.
+ */
+export const SPAWN_GRACE_TICKS = 30;
+/**
+ * Linear friction. Real Asteroids has zero friction — momentum is conserved.
+ * Retained as a constant for tests/back-compat but **not applied** in
+ * `worldTick`. Set above 0 only if a future game variant wants drag.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const FRICTION = 1.0;
 const ANGULAR_DAMPING = 0.9;
 
 // =============================================================================
@@ -72,24 +145,30 @@ function createShip(
   };
 }
 
-function createAsteroid(
+/**
+ * Create an asteroid of a given tier at `pos` with velocity `vel`.
+ * Radius, health, and vertex count are derived from the tier spec.
+ */
+export function createAsteroid(
+  tier: AsteroidTier,
   pos: Vector2D,
-  radius: number,
   vel: Vector2D,
-  config: GameConfig,
   rng: SeededRNG,
+  idOverride?: string,
 ): Asteroid {
-  const health = Math.ceil(radius / 15);
+  const spec = ASTEROID_TIERS[tier];
+  const radius = spec.radius;
   const mass = Math.PI * radius * radius * 0.01;
   return {
-    id: nextId(),
+    id: idOverride ?? nextId(),
     type: 'asteroid',
     pos: { ...pos },
     vel: { ...vel },
     radius,
-    health,
+    health: spec.health,
     mass,
-    vertices: generateAsteroidVertices(radius, rng),
+    tier,
+    vertices: generateAsteroidVertices(radius, rng, spec.vertexCount),
     rotation: rng.nextRange(0, Math.PI * 2),
     angularVel: rng.nextRange(-0.05, 0.05),
   };
@@ -126,39 +205,42 @@ export function createWorld(config: GameConfig): GameState {
   const ships: ShipState[] = [];
   const asteroids: Asteroid[] = [];
 
-  // Spawn ships at corners
-  const shipPositions: Vector2D[] = [
-    { x: config.worldWidth * 0.25, y: config.worldHeight * 0.25 },
-    { x: config.worldWidth * 0.75, y: config.worldHeight * 0.25 },
-    { x: config.worldWidth * 0.25, y: config.worldHeight * 0.75 },
-    { x: config.worldWidth * 0.75, y: config.worldHeight * 0.75 },
-  ];
-
+  // Deterministic-on-circle spawn. Each of N ships sits at angle
+  // `(i / N) × 2π` around the world centroid, on a radius of
+  // `min(W,H) × 0.35`, facing inward (toward the centroid). Cap at 16 —
+  // arena supports more than 8 if the harness wires bigger matches later.
   const derived = Math.floor((config.worldWidth * config.worldHeight) / 50000);
-  const shipCount = Math.max(
-    1,
-    Math.min(4, config.shipCount ?? derived),
-  );
+  const shipCount = Math.max(1, Math.min(16, config.shipCount ?? derived));
+  const cx = config.worldWidth / 2;
+  const cy = config.worldHeight / 2;
+  const ring = Math.min(config.worldWidth, config.worldHeight) * 0.35;
   for (let i = 0; i < shipCount; i++) {
-    const pos = shipPositions[i % shipPositions.length];
-    const angle = rng.nextRangeInclusive(0, Math.PI * 2);
+    const theta = (i / shipCount) * Math.PI * 2;
+    const pos: Vector2D = {
+      x: cx + Math.cos(theta) * ring,
+      y: cy + Math.sin(theta) * ring,
+    };
+    // Face inward (toward centroid).
+    const angle = theta + Math.PI;
     ships.push(createShip(`ship-${i}`, pos, angle, config));
   }
 
-  // Spawn asteroids away from ships
+  // Spawn asteroids away from ships. Ships sit on a ring around the
+  // centroid, so the centroid itself is a safe fallback if rejection
+  // sampling fails on a crowded seed.
   for (let i = 0; i < config.asteroidCount; i++) {
-    let pos: Vector2D = { x: 0, y: 0 };
+    let pos: Vector2D = { x: cx, y: cy };
     let valid = false;
     let attempts = 0;
 
-    while (!valid && attempts < 20) {
+    while (!valid && attempts < 60) {
       pos = {
         x: rng.nextRange(ASTEROID_MARGIN, config.worldWidth - ASTEROID_MARGIN),
         y: rng.nextRange(ASTEROID_MARGIN, config.worldHeight - ASTEROID_MARGIN),
       };
       valid = true;
       for (const ship of ships) {
-        if (dist(pos, ship.pos) < 150) {
+        if (dist(pos, ship.pos) < SHIP_ASTEROID_SPAWN_CLEARANCE) {
           valid = false;
           break;
         }
@@ -167,24 +249,23 @@ export function createWorld(config: GameConfig): GameState {
     }
 
     if (!valid) {
+      // Fallback: place at world centroid with a small jitter — guaranteed
+      // safe since ships are on a ring outside this radius.
       pos = {
-        x: rng.nextRange(ASTEROID_MARGIN, config.worldWidth - ASTEROID_MARGIN),
-        y: rng.nextRange(ASTEROID_MARGIN, config.worldHeight - ASTEROID_MARGIN),
+        x: cx + rng.nextRange(-30, 30),
+        y: cy + rng.nextRange(-30, 30),
       };
     }
 
-    const radius = rng.nextRangeInclusive(
-      config.asteroidBaseRadius,
-      config.asteroidBaseRadius * 3,
-    );
-    const speed = rng.nextRange(0.1, config.asteroidSpeed);
+    // All initial spawns are LARGE. Splits create MEDIUM then SMALL.
+    const speed = rng.nextRange(0.5, config.asteroidSpeed);
     const angle = rng.nextRangeInclusive(0, Math.PI * 2);
     const vel = {
       x: Math.cos(angle) * speed,
       y: Math.sin(angle) * speed,
     };
 
-    asteroids.push(createAsteroid(pos, radius, vel, config, rng));
+    asteroids.push(createAsteroid('LARGE', pos, vel, rng));
   }
 
   return {
@@ -219,7 +300,14 @@ export function worldTick(
     ships: state.ships.map((s) => ({ ...s })),
     asteroids: state.asteroids.map((a) => ({ ...a })),
     bullets: state.bullets
-      .map((b) => ({ ...b, age: b.age + 1 }))
+      .map((b) => {
+        const newPos = {
+          x: b.pos.x + b.vel.x,
+          y: b.pos.y + b.vel.y,
+        };
+        wrapPosition(newPos, state.worldWidth, state.worldHeight);
+        return { ...b, pos: newPos, age: b.age + 1 };
+      })
       .filter((b) => b.age < b.maxAge),
     config: state.config,
   };
@@ -240,7 +328,7 @@ export function worldTick(
     ship.angle += ship.angularVel;
     ship.angularVel *= ANGULAR_DAMPING;
 
-    // Thrust
+    // Thrust (ship-relative, forward or reverse).
     if (ship.thrust && ship.fuel > 0) {
       const thrustX = Math.cos(ship.thrustAngle) * state.config.shipThrust;
       const thrustY = Math.sin(ship.thrustAngle) * state.config.shipThrust;
@@ -251,9 +339,8 @@ export function worldTick(
       ship.thrust = false;
     }
 
-    // Natural damping
-    ship.vel.x *= FRICTION;
-    ship.vel.y *= FRICTION;
+    // Zero linear friction — real Asteroids preserves momentum. (Angular
+    // damping above is intentional — rotational input is impulse-based.)
 
     // Position update
     ship.pos.x += ship.vel.x;
@@ -313,11 +400,54 @@ export function spawnBullet(
 // Sensor / Bot Perception
 // =============================================================================
 
-const SENSOR_RANGE = 200;
+/**
+ * Bot perception range in px. Scaled proportionally to the 12× world
+ * area: 200 in the old 800px world → 600 in the new 2800px world. Bots
+ * can now see threats and opponents at meaningful tactical distance.
+ */
+const SENSOR_RANGE = 600;
+
+/**
+ * Shift `other`'s position into `viewer`'s toroidal local frame.
+ *
+ * Returns a copy of `other` with `pos` adjusted so that
+ * `other.pos.x - viewer.pos.x` and `other.pos.y - viewer.pos.y` give the
+ * shortest signed deltas across the wrapping world. The viewer's own
+ * `ship.pos` stays absolute, so absolute-frame logic (e.g. "orbit the
+ * world centroid") still works.
+ */
+function shiftIntoLocalFrame<T extends { pos: Vector2D }>(
+  other: T,
+  viewer: ShipState,
+  width: number,
+  height: number,
+): T {
+  const halfW = width / 2;
+  const halfH = height / 2;
+  let dx = other.pos.x - viewer.pos.x;
+  let dy = other.pos.y - viewer.pos.y;
+  if (dx > halfW) dx -= width;
+  else if (dx < -halfW) dx += width;
+  if (dy > halfH) dy -= height;
+  else if (dy < -halfH) dy += height;
+  // Shallow copy with a rewritten `pos`. Bots receive the structured-clone
+  // anyway when this crosses the isolate boundary, so shared internal refs
+  // are not a concern.
+  return { ...other, pos: { x: viewer.pos.x + dx, y: viewer.pos.y + dy } };
+}
 
 /**
  * Build the BotState for a specific ship.
- * Provides a limited view of the world (sensor range + full asteroid awareness).
+ *
+ * Provides a limited view of the world (sensor range + full asteroid
+ * awareness). Crucially, every visible opponent/asteroid/bullet is
+ * delivered in the viewer's **toroidal local frame**: their `pos` is
+ * shifted so that `other.pos.x - ship.pos.x` is the shortest signed
+ * distance across the wrapping world. Sensor-range filtering is also
+ * toroidal — a target 20 px across the seam is visible, not "780 px away."
+ *
+ * The viewer's own `ship.pos` is unchanged (absolute world coords) so
+ * absolute-frame logic (e.g. "orbit world centroid (400,300)") works.
  */
 export function buildBotState(
   state: GameState,
@@ -325,29 +455,56 @@ export function buildBotState(
 ): BotStateType | null {
   const ship = state.ships.find((s) => s.id === shipId);
   if (!ship) return null;
+  const W = state.worldWidth;
+  const H = state.worldHeight;
 
-  const opponents = state.ships.filter((s) => s.id !== shipId);
-  const nearbyAsteroids: Asteroid[] = state.asteroids.filter(
-    (a) => dist(a.pos, ship.pos) <= SENSOR_RANGE,
+  // Toroidal sensor filter + local-frame projection in one pass.
+  const visibleAsteroids: Asteroid[] = [];
+  for (const a of state.asteroids) {
+    if (toroidalDist(a.pos, ship.pos, W, H) <= SENSOR_RANGE) {
+      visibleAsteroids.push(shiftIntoLocalFrame(a, ship, W, H));
+    }
+  }
+  // Every other LIVE ship is visible (full opponent list), in local frame.
+  // Dead ships (health <= 0) are filtered out so bots never target corpses.
+  const allOpponents: ShipState[] = [];
+  const nearbyOpponents: ShipState[] = [];
+  for (const s of state.ships) {
+    if (s.id === shipId) continue;
+    if (s.health <= 0) continue;
+    const shifted = shiftIntoLocalFrame(s, ship, W, H);
+    allOpponents.push(shifted);
+    if (toroidalDist(s.pos, ship.pos, W, H) <= SENSOR_RANGE) {
+      nearbyOpponents.push(shifted);
+    }
+  }
+  const visibleBullets: Bullet[] = [];
+  for (const b of state.bullets) {
+    if (toroidalDist(b.pos, ship.pos, W, H) <= SENSOR_RANGE) {
+      visibleBullets.push(shiftIntoLocalFrame(b, ship, W, H));
+    }
+  }
+  // Full-awareness asteroid list (all asteroids in local frame, not range-limited).
+  const allAsteroidsLocal: Asteroid[] = state.asteroids.map((a) =>
+    shiftIntoLocalFrame(a, ship, W, H),
   );
-  const nearbyOpponents: ShipState[] = opponents.filter(
-    (s) => dist(s.pos, ship.pos) <= SENSOR_RANGE,
+  // Full-awareness bullet list in local frame for the bots that want it.
+  const allBulletsLocal: Bullet[] = state.bullets.map((b) =>
+    shiftIntoLocalFrame(b, ship, W, H),
   );
-  const nearbyBullets: Bullet[] = state.bullets.filter(
-    (b) => dist(b.pos, ship.pos) <= SENSOR_RANGE,
-  );
+
   const nearby = [
-    ...nearbyAsteroids,
+    ...visibleAsteroids,
     ...nearbyOpponents,
-    ...nearbyBullets,
+    ...visibleBullets,
   ] as Entity[];
 
   return {
     ship,
     nearbyEntities: nearby,
-    asteroids: state.asteroids,
-    opponents,
-    bullets: state.bullets,
+    asteroids: allAsteroidsLocal,
+    opponents: allOpponents,
+    bullets: allBulletsLocal,
     score: ship.score,
     tick: state.tick,
   } as BotStateType;

@@ -27,7 +27,12 @@ import type { MatchRecorder } from '../replay/recorder.js';
 
 /** Counts of each action type emitted by a single ship over a match. */
 export interface ActionHistogram {
+  /** Total thrust calls (forward + reverse). */
   thrust: number;
+  /** Forward-direction thrust calls. `thrust = thrustFwd + thrustRev`. */
+  thrustFwd: number;
+  /** Reverse-direction thrust calls. `thrust = thrustFwd + thrustRev`. */
+  thrustRev: number;
   rotate: number;
   fire: number;
   wait: number;
@@ -68,12 +73,30 @@ const ACTION_TYPES: ReadonlyArray<BotAction['type']> = [
 
 function isValidAction(a: unknown): a is BotAction {
   if (!a || typeof a !== 'object') return false;
-  const t = (a as { type?: unknown }).type;
-  return typeof t === 'string' && (ACTION_TYPES as readonly string[]).includes(t);
+  const obj = a as { type?: unknown; direction?: unknown };
+  const t = obj.type;
+  if (typeof t !== 'string') return false;
+  if (!(ACTION_TYPES as readonly string[]).includes(t)) return false;
+  // thrust and rotate must carry a valid `direction` field. Old-shape
+  // `{type:'thrust', angle: number}` (no direction) is rejected and gets
+  // bucketed into `histogram.invalid` — this is the breaking change that
+  // forces evolved bots to migrate to the new ship-relative thrust API.
+  if (t === 'thrust' || t === 'rotate') {
+    return obj.direction === 1 || obj.direction === -1;
+  }
+  return true;
 }
 
 function emptyHistogram(): ActionHistogram {
-  return { thrust: 0, rotate: 0, fire: 0, wait: 0, invalid: 0 };
+  return {
+    thrust: 0,
+    thrustFwd: 0,
+    thrustRev: 0,
+    rotate: 0,
+    fire: 0,
+    wait: 0,
+    invalid: 0,
+  };
 }
 
 function recordAction(h: ActionHistogram, action: BotAction | null): void {
@@ -82,6 +105,10 @@ function recordAction(h: ActionHistogram, action: BotAction | null): void {
     return;
   }
   h[action.type] += 1;
+  if (action.type === 'thrust') {
+    if (action.direction === 1) h.thrustFwd += 1;
+    else h.thrustRev += 1;
+  }
 }
 
 /**
@@ -143,9 +170,11 @@ export function playMatch(
       if (ship.health <= 0) continue;
       const report = reports.get(ship.id);
       if (report) report.ticksAlive += 1;
-      // Per-tick survival bonus. Tiebreaker for matches where neither
-      // bot scores from combat. Capped implicitly by maxTicks.
-      ship.score += 1;
+      // NOTE: no per-tick survival bonus. The earlier +1/tick rewarded
+      // passive bots (600 ticks alive = 600 score) over active bots that
+      // shot asteroids (a LARGE→MED→SMALL chain = ~600 score and you die
+      // earlier). `outcomeForNWay` still uses `survived` as a W/L/D
+      // tiebreaker so survival matters for ranking — just not for raw score.
 
       const bot = shipBots.get(ship.id);
       const botState = bot ? buildBotState(state, ship.id) : null;

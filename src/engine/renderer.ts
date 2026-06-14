@@ -27,8 +27,11 @@ import type { GameState, ReplayFrame } from '../shared/types.js';
 export function toReplayFrame(state: GameState): ReplayFrame {
   const entities: ReplayFrame['entities'] = [];
 
-  // Ships
+  // Ships — dead ships (health <= 0) are omitted so the canvas stops
+  // rendering corpses once they're destroyed. Their final score still
+  // lives in the match report.
   for (const ship of state.ships) {
+    if (ship.health <= 0) continue;
     entities.push({
       type: 'ship',
       id: ship.id,
@@ -36,6 +39,7 @@ export function toReplayFrame(state: GameState): ReplayFrame {
       angle: ship.angle,
       health: ship.health,
       shield: ship.shields,
+      score: ship.score,
     });
   }
 
@@ -49,6 +53,7 @@ export function toReplayFrame(state: GameState): ReplayFrame {
       health: asteroid.health,
       vertices: asteroid.vertices.map((v) => ({ x: v.x, y: v.y })),
       rotation: asteroid.rotation,
+      tier: asteroid.tier,
     });
   }
 

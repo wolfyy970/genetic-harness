@@ -20,17 +20,40 @@ import type { ShipReport } from '../orchestrator/match.js';
  * History:
  *   1 — initial circular asteroids; ship/bullet/asteroid entities
  *   2 — asteroids gain `vertices` + `rotation` for jagged polygonal rendering
+ *   3 — asteroids gain `tier: 'LARGE'|'MEDIUM'|'SMALL'`; arcade-style sizes
+ *   4 — 8-ship FFA topology: `participants` carries 8 entries, `shipReports`
+ *       has 8 entries, new `archived-elite` participant role for self-play
  */
-export const REPLAY_SCHEMA = 2;
+export const REPLAY_SCHEMA = 4;
 
 /** Schema version for `manifest.json`. */
 export const MANIFEST_SCHEMA = 1;
 
 export interface ReplayParticipant {
   shipId: string;
-  role: 'candidate' | 'reference';
+  /**
+   * `candidate` — the bot being evaluated (always ship-0).
+   * `reference` — a scripted bot from the frozen reference roster.
+   * `archived-elite` — another evolved bot from the population (self-play).
+   */
+  role: 'candidate' | 'reference' | 'archived-elite';
   /** Reference-bot id (e.g. 'ref-aggressive') or evolved candidate id. */
   refId?: string;
+}
+
+/** Topology of a recorded match — drives dashboard filtering + labelling. */
+export type ReplayTopology = 'ffa' | 'selfplay' | '1v1';
+
+/**
+ * Per-ship outcome summary for a replay match. Lets the dashboard render
+ * rank + survival in the dropdown without re-fetching the replay JSON.
+ */
+export interface ReplayRank {
+  shipId: string;
+  refId: string;
+  score: number;
+  rank: number;
+  survived: boolean;
 }
 
 /**
@@ -66,14 +89,27 @@ export interface ReplayManifestEntry {
   bestShipId: string;
   /**
    * Replay files written for this generation, relative to `archiveDir`,
-   * e.g. `generations/gen-0001/match-cand-1-vs-ref-aggressive-seed101.json`.
+   * e.g. `generations/gen-0001/match-cand-1-ffa-seed101.json`.
+   *
+   * `seed` + `topology` + `ranks` (schema 4) are optional so older
+   * manifests still parse; new code falls back gracefully.
    */
   replays: Array<{
     path: string;
     shipId: string;
+    /**
+     * Pre-schema-4: opponent shipId (1v1). Post-schema-4: kept for
+     * backward-compat — the dashboard prefers `ranks[]` when present.
+     */
     opponent: string;
     fitness: number;
     durationTicks: number;
+    /** Match seed (deterministic) — schema 4+. */
+    seed?: number;
+    /** Topology of the match — schema 4+. */
+    topology?: ReplayTopology;
+    /** Per-ship rank + survival summary — schema 4+. */
+    ranks?: ReplayRank[];
   }>;
 }
 

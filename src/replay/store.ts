@@ -82,6 +82,26 @@ export function ensureArchiveDir(archiveDir: string): void {
 }
 
 /**
+ * Wipe an archive directory clean, then re-create it empty.
+ *
+ * Safety: this is destructive — only call when the caller has explicit
+ * user intent ("fresh run"). The implementation re-resolves the path and
+ * rejects anything that doesn't end in our expected segment shape; that
+ * keeps a misconfigured `archiveDir: '/'` from torching the filesystem.
+ */
+export function clearArchiveDir(archiveDir: string): void {
+  const resolved = resolve(archiveDir);
+  // Refuse to nuke filesystem roots or anything that looks like one.
+  if (resolved === sep || resolved === '/' || resolved.split(sep).filter(Boolean).length < 2) {
+    throw new Error(`Refusing to clear suspiciously-shallow archive path: ${resolved}`);
+  }
+  if (existsSync(resolved)) {
+    rmSync(resolved, { recursive: true, force: true });
+  }
+  mkdirSync(resolved, { recursive: true });
+}
+
+/**
  * Persist a leaderboard snapshot to `<archiveDir>/leaderboard.json`.
  * Atomic via write-and-rename to avoid readers seeing a half-written file.
  */

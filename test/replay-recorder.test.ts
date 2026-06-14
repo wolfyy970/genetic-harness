@@ -60,7 +60,7 @@ function stubReport(durationTicks: number): MatchReport {
     ticksAlive: durationTicks,
     cpuNanosTotal: 12_345n,
     cpuNanosMax: 999n,
-    histogram: { thrust: 1, rotate: 2, fire: 3, wait: 4, invalid: 0 },
+    histogram: { thrust: 1, thrustFwd: 1, thrustRev: 0, rotate: 2, fire: 3, wait: 4, invalid: 0 },
     survived: true,
   };
   return { ships: [ship], durationTicks, endedByElimination: false };
@@ -137,7 +137,7 @@ describe('JsonReplayRecorder', () => {
     for (let t = 0; t < 3; t++) r.onTick(makeState(t));
     const file = r.finalize(stubReport(3));
 
-    expect(file.schema).toBe(2);
+    expect(file.schema).toBe(4);
     expect(file.arena).toBe('asteroids');
     expect(file.generation).toBe(12);
     expect(file.matchId).toBe('gen0012-elite-vs-ref');
